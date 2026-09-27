@@ -1,4 +1,4 @@
-"""Persönliches Dashboard: eigene Schichten, Sperrtage-Kalender, Präferenzen."""
+"""Persönliches Dashboard: Angaben für den Monat, Verfügbarkeits-Kalender, eigene Schichten."""
 import math
 
 import pandas as pd
@@ -23,59 +23,75 @@ def render(user: dict, month: str) -> None:
         _render_my_shifts(user, month)
         st.info("Der Plan für diesen Monat ist veröffentlicht.")
     elif open_:
-        st.success(f"⏳ {deadline.describe(month)}. Bis dahin kannst du Sperrtage und Wünsche ändern.")
+        st.success(f"⏳ {deadline.describe(month)}. Bis dahin kannst du alles ändern.")
     else:
         st.warning(f"🔒 {deadline.describe(month)}. Die Leitung erstellt jetzt den Plan – "
                    "du siehst ihn hier, sobald er veröffentlicht ist.")
 
-    st.subheader("Wann kannst du nicht?")
-    st.caption("Stell bei jedem Tag, an dem du **nicht** kannst, **✕** ein – der Tag wird rot. "
-               "✓ = du kannst. 🎭 = an diesem Tag gibt es passende Schichten. "
-               "Gespeichert wird unten mit „Angaben speichern“.")
-    _render_calendar(user, month, locked)
+    st.subheader(f"Deine Angaben für {month_label(month)}")
+    prefs, errors, p, k = _render_preferences(user, month, locked)
 
-    st.subheader("Deine Angaben für den Monat")
-    _render_preferences(user, month, locked)
+    number = 5 if prefs["role_choice"] == "BEIDE" else 4
+    st.markdown(f"**{number}. An welchen Tagen kannst du nicht – oder nur teilweise?**")
+    _render_calendar(user, month, locked, prefs["role_choice"])
+
+    _render_summary_and_save(user, month, prefs, errors, p, k, locked)
 
 
 # ------------------------------------------------------------------ Kalender
-FREE, BLOCKED = "✓", "✕"
+# Auswahl je Tag -> gespeicherter Tagesteil (None = kann ganztags)
+OPT_TO_PART = {"✓": None, "☀": "ABEND", "🌙": "TAG", "✕": "GANZ"}
+OPTS_FULL = ["✓", "☀", "🌙", "✕"]          # bei Kasse: Tageskasse (tagsüber) vs. abends
+OPTS_SIMPLE = ["✓", "✕"]                    # nur Einlass: gibt es nur abends
+PART_COLORS = {"GANZ": ("#FDE2E1", "#C62828"), "TAG": ("#FFF4D6", "#E0A100"), "ABEND": ("#FFF4D6", "#E0A100")}
 
 
-def _blocked_keys(user: dict, month: str) -> tuple[str, str]:
-    k = f"{month}_{user['id']}"
-    return f"blocked_{k}", f"blocked_saved_{k}"
+def _option_for(part: str | None, simple: bool) -> str:
+    if simple:   # nur Einlass (abends): "nur tagsüber" heißt praktisch "kann nicht"
+        return "✕" if part in ("GANZ", "ABEND") else "✓"
+    return {None: "✓", "ABEND": "☀", "TAG": "🌙", "GANZ": "✕"}[part]
 
 
-def _render_calendar(user: dict, month: str, locked: bool) -> None:
-    """Sperrtage werden nur im Browser (session_state) gesammelt und erst beim Speichern
-    in die Datenbank geschrieben – dadurch reagiert der Kalender sofort."""
-    cur_key, saved_key = _blocked_keys(user, month)
+def _blocked_keys(user_id: int, month: str) -> tuple[str, str]:
+    return f"blocked_{month}_{user_id}", f"blocked_saved_{month}_{user_id}"
+
+
+def _render_calendar(user: dict, month: str, locked: bool, role: str) -> None:
+    """Verfügbarkeiten werden im Browser gesammelt und erst beim Speichern in die
+    Datenbank geschrieben – dadurch reagiert der Kalender sofort."""
+    cur_key, saved_key = _blocked_keys(user["id"], month)
     if cur_key not in st.session_state:
-        saved = set(db.get_blocked_days(user["id"], month))
-        st.session_state[saved_key] = saved
-        st.session_state[cur_key] = set(saved)
-    role = st.session_state.get(f"role_{month}") or db.get_preferences(user["id"], month)["role_choice"]
-    shift_days = db.shift_dates_for_types(month, ALLOWED_TYPES[role])
-    _calendar_fragment(user["id"], month, shift_days, locked)
+        saved = db.get_blocked_days(user["id"], month)
+        st.session_state[saved_key] = dict(saved)
+        st.session_state[cur_key] = dict(saved)
+    simple = role == "EINLASS"
+    if simple:
+        st.caption("Stell bei jedem Tag, an dem du **nicht** kannst, **✕** ein – der Tag wird rot. "
+                   "🎭 = Vorstellung.")
+    else:
+        st.caption("Pro Tag: **✓** kann ganztags · **☀** nur tagsüber (Tageskasse) · "
+                   "**🌙** nur abends (Abendkasse/Einlass) · **✕** gar nicht. "
+                   "Rot = gar nicht, gelb = nur teilweise. 🎭 = Vorstellung.")
+    shift_days = db.shift_dates_for_types(month, {"ABENDKASSE", "EINLASS"})
+    _calendar_fragment(user["id"], month, shift_days, locked, simple)
 
 
 @st.fragment
-def _calendar_fragment(user_id: int, month: str, shift_days: set[str], locked: bool) -> None:
-    """Fragment: Änderungen im Kalender laden nur den Kalender neu, nicht die ganze Seite."""
-    cur_key, saved_key = f"blocked_{month}_{user_id}", f"blocked_saved_{month}_{user_id}"
-    blocked: set[str] = st.session_state[cur_key]
+def _calendar_fragment(user_id: int, month: str, shift_days: set[str], locked: bool, simple: bool) -> None:
+    """Fragment: Änderungen laden nur den Kalender neu, nicht die ganze Seite."""
+    cur_key, saved_key = _blocked_keys(user_id, month)
+    cur: dict[str, str] = st.session_state[cur_key]
+    options = OPTS_SIMPLE if simple else OPTS_FULL
+    mode = "s" if simple else "f"
     _, m = parse_month(month)
     days_in_month = [d for w in month_weeks(month) for d in w if d.month == m]
 
-    def _set_all(value: str) -> None:
+    def _free_all() -> None:
+        cur.clear()
         for d in days_in_month:
-            st.session_state[f"day_{month}_{user_id}_{d.isoformat()}"] = value
-        blocked.clear()
-        if value == BLOCKED:
-            blocked.update(d.isoformat() for d in days_in_month)
+            st.session_state[f"day_{month}_{user_id}_{mode}_{d.isoformat()}"] = "✓"
 
-    red = []
+    colored: dict[str, str] = {}
     with st.container(key="kalender"):
         header = st.columns(7)
         for i, wd in enumerate(WEEKDAYS):
@@ -88,30 +104,35 @@ def _calendar_fragment(user_id: int, month: str, shift_days: set[str], locked: b
                         st.markdown("&nbsp;", unsafe_allow_html=True)
                         continue
                     iso = d.isoformat()
-                    wkey = f"day_{month}_{user_id}_{iso}"
+                    wkey = f"day_{month}_{user_id}_{mode}_{iso}"
                     if wkey not in st.session_state:
-                        st.session_state[wkey] = BLOCKED if iso in blocked else FREE
+                        st.session_state[wkey] = _option_for(cur.get(iso), simple)
                     with st.container(key=f"cal_{iso}"):
                         st.markdown(f"**{d.day}**{' 🎭' if iso in shift_days else ''}")
-                        val = st.selectbox(f"{d.day}.", [FREE, BLOCKED], key=wkey, disabled=locked,
+                        val = st.selectbox(f"{d.day}.", options, key=wkey, disabled=locked,
                                            label_visibility="collapsed")
-                    if val == BLOCKED:
-                        blocked.add(iso)
-                        red.append(iso)
+                    part = OPT_TO_PART[val]
+                    if part:
+                        cur[iso] = part
+                        colored[iso] = part
                     else:
-                        blocked.discard(iso)
+                        cur.pop(iso, None)
 
-    # gesperrte Tage rot einfärben (CSS für genau diese Tage)
-    if red:
-        sel = ", ".join(f".st-key-cal_{iso}" for iso in red)
-        st.markdown(f"<style>{sel} {{ background:#FDE2E1; border:1px solid #C62828; border-radius:8px; }}</style>",
-                    unsafe_allow_html=True)
+    # Tage einfärben: rot = gar nicht, gelb = nur teilweise
+    css = [f".st-key-cal_{iso} {{ background:{PART_COLORS[p][0]}; border:1px solid {PART_COLORS[p][1]}; "
+           f"border-radius:8px; }}" for iso, p in colored.items()]
+    if css:
+        st.markdown("<style>" + " ".join(css) + "</style>", unsafe_allow_html=True)
 
+    n_full = sum(1 for p in cur.values() if p == "GANZ")
+    n_part = len(cur) - n_full
+    text = f"**{n_full} Tag(e) gar nicht**" + (f", **{n_part} Tag(e) nur teilweise**" if n_part and not simple else "")
+    if cur != st.session_state[saved_key]:
+        text += " – noch nicht gespeichert"
     c1, c2 = st.columns([3, 2])
-    changed = blocked != st.session_state[saved_key]
-    c1.caption(f"**{len(blocked)} Tag(e) gesperrt**" + (" – noch nicht gespeichert" if changed else ""))
-    if not locked and blocked:
-        c2.button("Alle Tage freigeben", on_click=_set_all, args=(FREE,), key=f"free_all_{month}_{user_id}")
+    c1.caption(text)
+    if not locked and cur:
+        c2.button("Alle Tage freigeben", on_click=_free_all, key=f"free_all_{month}_{user_id}")
 
 
 # ------------------------------------------------------------------ Präferenzen
@@ -165,14 +186,8 @@ def summary_text(pr: dict) -> str:
     return text
 
 
-def _save(user_id: int, month: str, prefs: dict, blocked: set[str], saved_key: str, k: str) -> None:
-    db.save_preferences(user_id, month, prefs)
-    db.set_blocked_days(user_id, month, blocked)
-    st.session_state[saved_key] = set(blocked)
-    st.session_state[f"just_saved_{k}"] = True
-
-
-def _render_preferences(user: dict, month: str, locked: bool) -> None:
+def _render_preferences(user: dict, month: str, locked: bool) -> tuple[dict, list[str], dict, str]:
+    """Fragen 1–4. Gibt (Angaben, Fehler, gespeicherte Angaben, Schlüssel) zurück."""
     p = db.get_preferences(user["id"], month)
     k = f"{month}_{user['id']}"                       # eindeutige Schlüssel je Monat
     if p.get("carried_from") and not locked:
@@ -214,7 +229,7 @@ def _render_preferences(user: dict, month: str, locked: bool) -> None:
 
     # 3) Tage
     st.markdown("**3. Wann kannst du?**")
-    st.caption("Einzelne Tage, an denen du gar nicht kannst, sperrst du oben im Kalender.")
+    st.caption("Einzelne Tage, an denen du nicht oder nur teilweise kannst, trägst du unten im Kalender ein.")
     excl_keys = list(WEEKEND_EXCLUSION)
     weekend = st.radio("Wochenende", excl_keys, index=excl_keys.index(p["weekend_exclusion"]),
                        format_func=WEEKEND_EXCLUSION.get, horizontal=True, disabled=locked,
@@ -263,17 +278,27 @@ def _render_preferences(user: dict, month: str, locked: bool) -> None:
     if sum(lim["min"] for lim in type_limits.values()) > max_shifts:
         errors.append("Die Wunsch-Mindestzahlen bei Kasse und Einlass sind zusammen größer als deine Höchstzahl.")
 
-    # Zusammenfassung + Speichern
+    return prefs, errors, p, k
+
+
+def _save(user_id: int, month: str, prefs: dict, k: str) -> None:
+    cur_key, saved_key = _blocked_keys(user_id, month)
+    blocked = dict(st.session_state.get(cur_key, {}))     # aktueller Stand aus dem Kalender
+    db.save_preferences(user_id, month, prefs)
+    db.set_blocked_days(user_id, month, blocked)
+    st.session_state[saved_key] = dict(blocked)
+    st.session_state[f"just_saved_{k}"] = True
+
+
+def _render_summary_and_save(user: dict, month: str, prefs: dict, errors: list[str], p: dict, k: str,
+                             locked: bool) -> None:
     st.markdown("**So wirst du eingeplant:**")
-    st.info(summary_text(prefs))
+    st.info(summary_text(prefs) + " Einzelne Tage wie im Kalender angegeben.")
     for e in errors:
         st.error(e)
-    cur_key, saved_key = _blocked_keys(user, month)
-    blocked_now = st.session_state.get(cur_key, set())
-    st.caption(f"Außerdem gesperrt: {len(blocked_now)} Tag(e) im Kalender oben.")
     # Speichern als Callback: läuft VOR dem nächsten Seitenaufbau, damit alle Anzeigen sofort stimmen
     st.button("Angaben speichern", type="primary", disabled=locked or bool(errors), key=f"save_{k}",
-              on_click=_save, args=(user["id"], month, prefs, set(blocked_now), saved_key, k))
+              on_click=_save, args=(user["id"], month, prefs, k))
     if st.session_state.pop(f"just_saved_{k}", False):
         st.success("Gespeichert – danke! Du kannst bis zur Anmeldefrist noch alles ändern.")
         p = db.get_preferences(user["id"], month)

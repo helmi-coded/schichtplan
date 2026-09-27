@@ -60,9 +60,8 @@ def main(month: str) -> None:
     days = [d.isoformat() for w in month_weeks(month) for d in w if d.month == m]
     prev = previous_month(month)
     for uid in ids:
-        for d in random.sample(days, random.randint(2, 9)):
-            if d not in db.get_blocked_days(uid, month):
-                db.toggle_blocked_day(uid, d)
+        db.set_blocked_days(uid, month, {d: random.choice(["GANZ", "GANZ", "TAG", "ABEND"])
+                                         for d in random.sample(days, random.randint(2, 9))})
         prefs = db.default_preferences()
         prefs.update({
             "role_choice": role_of[uid],

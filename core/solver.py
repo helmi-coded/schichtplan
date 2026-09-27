@@ -5,7 +5,7 @@ Prinzip: Für jede zulässige Kombination (Person, Schicht) gibt es eine 0/1-Var
 formuliert, weiche Restriktionen als Punkte in einer Zielfunktion, die maximiert wird.
 
 HARTE Restriktionen (werden nie verletzt)
-  - Sperrtage, ausgeschlossener Wochenendtag
+  - Sperrtage (ganztags, nur tagsüber oder nur abends), ausgeschlossener Wochenendtag
   - Einsatzwunsch des Monats (Kasse / Einlass / beides)
   - Schicht- und Stunden-Obergrenze pro Monat, Obergrenze je Schichtart
   - max. Schichten pro Tag, keine zeitlich überlappenden Schichten
@@ -54,7 +54,7 @@ class EmployeeInput:
     weekend_exclusion: str = "KEINE"
     weekday_weights: list[int] = field(default_factory=lambda: [0] * 7)
     type_limits: dict = field(default_factory=dict)
-    blocked: set[str] = field(default_factory=set)
+    blocked: dict = field(default_factory=dict)   # {Datum: GANZ | TAG | ABEND} (ein set = ganze Tage)
     prev_weekend_shifts: int = 0
 
 
@@ -91,11 +91,31 @@ class SolveResult:
     hints: list[str]
 
 
+DAYTIME_TYPES = {"TAGESKASSE"}          # alles andere zählt als "abends"
+
+
+def _blocked_part(blocked, date_iso: str) -> str | None:
+    if isinstance(blocked, dict):
+        return blocked.get(date_iso)
+    return "GANZ" if date_iso in blocked else None
+
+
+def blocks(part: str | None, shift_type: str) -> bool:
+    """Sperrt ein Sperrtag (GANZ/TAG/ABEND) diese Schichtart?"""
+    if part == "GANZ":
+        return True
+    if part == "TAG":
+        return shift_type in DAYTIME_TYPES
+    if part == "ABEND":
+        return shift_type not in DAYTIME_TYPES
+    return False
+
+
 def is_eligible(e: EmployeeInput, s: ShiftInput) -> bool:
     """Prüft alle harten Einzel-Restriktionen einer Person für eine Schicht."""
     if s.shift_type not in ALLOWED_TYPES[e.role_permission]:
         return False
-    if s.date in e.blocked:
+    if blocks(_blocked_part(e.blocked, s.date), s.shift_type):
         return False
     if e.weekend_exclusion == "SA" and s.weekday == 5:
         return False

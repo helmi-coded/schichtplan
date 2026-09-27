@@ -224,6 +224,9 @@ MIGRATIONS = {
     },
     "shifts": {"performance_id": "INTEGER REFERENCES performances(id) ON DELETE CASCADE"},
     "plan_status": {"deadline_override": "TEXT"},
+    # part: GANZ = ganzer Tag gesperrt, TAG = tagsüber gesperrt (nur abends möglich),
+    #       ABEND = abends gesperrt (nur tagsüber möglich)
+    "blocked_days": {"part": "TEXT NOT NULL DEFAULT 'GANZ'"},
     "preferences": {"role_choice": "TEXT NOT NULL DEFAULT 'BEIDE'", "max_hours": "REAL",
                     "min_shifts": "INTEGER NOT NULL DEFAULT 0"},
 }
@@ -328,27 +331,28 @@ def deactivate_user(user_id: int) -> None:
 
 
 # ---------------------------------------------------------------- Sperrtage
-def get_blocked_days(user_id: int, month: str) -> set[str]:
+def get_blocked_days(user_id: int, month: str) -> dict[str, str]:
+    """Sperrtage der Person: {Datum: GANZ | TAG | ABEND}."""
     with get_conn() as c:
-        rows = c.execute("SELECT date FROM blocked_days WHERE user_id = ? AND date LIKE ?",
+        rows = c.execute("SELECT date, part FROM blocked_days WHERE user_id = ? AND date LIKE ?",
                          (user_id, f"{month}-%"))
-        return {r["date"] for r in rows}
+        return {r["date"]: r["part"] or "GANZ" for r in rows}
 
 
-def get_all_blocked(month: str) -> dict[int, set[str]]:
-    result: dict[int, set[str]] = {}
+def get_all_blocked(month: str) -> dict[int, dict[str, str]]:
+    result: dict[int, dict[str, str]] = {}
     with get_conn() as c:
-        for r in c.execute("SELECT user_id, date FROM blocked_days WHERE date LIKE ?", (f"{month}-%",)):
-            result.setdefault(r["user_id"], set()).add(r["date"])
+        for r in c.execute("SELECT user_id, date, part FROM blocked_days WHERE date LIKE ?", (f"{month}-%",)):
+            result.setdefault(r["user_id"], {})[r["date"]] = r["part"] or "GANZ"
     return result
 
 
-def set_blocked_days(user_id: int, month: str, dates: set[str]) -> None:
+def set_blocked_days(user_id: int, month: str, days: dict[str, str]) -> None:
     """Ersetzt alle Sperrtage der Person im Monat (eine Datenbank-Transaktion)."""
     with get_conn() as c:
         c.execute("DELETE FROM blocked_days WHERE user_id = ? AND date LIKE ?", (user_id, f"{month}-%"))
-        c.executemany("INSERT INTO blocked_days(user_id, date) VALUES (?, ?)",
-                      [(user_id, d) for d in sorted(dates) if d.startswith(month)])
+        c.executemany("INSERT INTO blocked_days(user_id, date, part) VALUES (?, ?, ?)",
+                      [(user_id, d, part) for d, part in sorted(days.items()) if d.startswith(month)])
 
 
 def toggle_blocked_day(user_id: int, date_iso: str) -> bool:

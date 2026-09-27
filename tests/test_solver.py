@@ -50,7 +50,19 @@ def test_min_wish_and_groups():
     assert count[2] <= 1                                   # Gruppen-Obergrenze Einlass
 
 
+def test_partial_day_blocks():
+    # Person kann am 06.10. nur tagsüber, am 07.10. nur abends
+    e = EmployeeInput(1, "A", "BEIDE", 13.90, max_shifts=10,
+                      blocked={"2026-10-06": "ABEND", "2026-10-07": "TAG"})
+    shifts = [_shift(1, 6, "TAGESKASSE", "11:00", "13:00"), _shift(2, 6, "ABENDKASSE", "17:30", "19:45"),
+              _shift(3, 7, "TAGESKASSE", "11:00", "13:00"), _shift(4, 7, "EINLASS", "17:30", "22:30")]
+    res = solve([e], shifts, minijob_limit_eur=603, max_shifts_per_day=1, time_limit_s=5)
+    got = {s for s, _ in res.assignments}
+    assert got == {1, 4}                                   # 06.: nur Tageskasse, 07.: nur abends
+
+
 if __name__ == "__main__":
+    test_partial_day_blocks()
     test_hard_constraints()
     test_minijob_cap()
     test_min_wish_and_groups()

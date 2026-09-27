@@ -5,7 +5,8 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from core import auth, db, deadline, importer, mailer, planning, spielplan
+from core import auth, db, deadline, export_excel, importer, mailer, planning, spielplan
+from core.solver import blocks
 from core.calendar_utils import (WEEKDAYS, now_local, fmt_date, fmt_eur, month_label, month_weeks,
                                  parse_month, previous_month, weekday)
 from core.constants import ALLOWED_TYPES, PLAN_STATUS, SHIFT_TYPES
@@ -111,8 +112,26 @@ def _tab_planning(month: str, status: str, admin: dict) -> None:
         })
         _manual_correction(month, status)
 
+        # Export im Format des Regieplans (ein Tabellenblatt pro Monat)
+        st.markdown("**Regieplan (Excel)** – Einlass, Tageskasse und Abendkasse sind eingetragen; "
+                    "Technik, ASL, Proben und Sonstiges bleiben frei.")
+        label = month_label(month).replace(" ", "_")
+        c1, c2 = st.columns(2)
+        c1.download_button(f"📥 Regieplan {month_label(month)}", export_excel.export_regieplan([month]),
+                           file_name=f"{date.today().isoformat()}_Regieplan_{label}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary", key=f"xlsx_{month}")
+        all_months = export_excel.months_with_shifts(month)
+        if len(all_months) > 1:
+            c2.download_button(f"📥 Alle Monate ({len(all_months)} Blätter)",
+                               export_excel.export_regieplan(all_months),
+                               file_name=f"{date.today().isoformat()}_Regieplan_alle_Monate.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key=f"xlsx_all_{month}")
+        st.caption("Tipp für Google Tabellen: Datei → Importieren → Hochladen → „Neue Tabellenblätter "
+                   "einfügen“ – dann landet der Monat als eigener Reiter in eurem Regieplan.")
         csv = overview.to_csv(sep=";", index=False).encode("utf-8-sig")
-        st.download_button("Plan als CSV exportieren", csv,
+        st.download_button("Übersicht als CSV", csv,
                            file_name=f"{date.today().isoformat()}_Schichtplan_{month}.csv", mime="text/csv")
 
         if status == "ENTWURF":
@@ -151,8 +170,10 @@ def _manual_correction(month: str, status: str) -> None:
             u = next(x for x in users if x["id"] == uid)
             if shift["shift_type"] not in ALLOWED_TYPES[db.get_preferences(uid, month)["role_choice"]]:
                 st.warning(f"{u['name']} möchte diesen Monat keine {SHIFT_TYPES[shift['shift_type']]}-Schichten.")
-            if shift["date"] in blocked.get(uid, set()):
-                st.warning(f"{u['name']} hat diesen Tag gesperrt.")
+            part = blocked.get(uid, {}).get(shift["date"])
+            if blocks(part, shift["shift_type"]):
+                st.warning(f"{u['name']} kann an diesem Tag " +
+                           {"GANZ": "gar nicht.", "TAG": "nur abends.", "ABEND": "nur tagsüber."}[part])
         if len(chosen) > shift["required"]:
             st.warning(f"Mehr Personen ({len(chosen)}) als benötigt ({shift['required']}).")
         if st.button("Zuteilung speichern", key="mc_save"):
