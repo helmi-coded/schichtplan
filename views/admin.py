@@ -23,6 +23,7 @@ def render(user: dict, month: str) -> None:
     status = db.get_plan_status(month)
     st.caption(f"Planstatus: **{PLAN_STATUS[status]}**")
     sections = {
+        "Probeplan": lambda: _tab_trial(month, user),
         "Planung": lambda: _tab_planning(month, status, user),
         "Termine & Schichten": lambda: _tab_shifts(month),
         "Team": lambda: _tab_team(user),
@@ -32,10 +33,73 @@ def render(user: dict, month: str) -> None:
         "Protokoll": lambda: st.dataframe(pd.DataFrame(db.list_audit()), hide_index=True),
     }
     # Nur der gewählte Bereich wird aufgebaut – das spart viele Datenbankabfragen je Klick
-    choice = st.segmented_control("Bereich", list(sections), default="Planung", key="admin_section",
-                                  label_visibility="collapsed") or "Planung"
+    choice = st.segmented_control("Bereich", list(sections), default="Probeplan", key="admin_section",
+                                  label_visibility="collapsed") or "Probeplan"
     st.divider()
     sections[choice]()
+
+
+# ------------------------------------------------------------------ Probeplan
+def _tab_trial(month: str, admin: dict) -> None:
+    """Probeplan ohne Bedingungen: jederzeit berechnen, ansehen, als Excel laden – ohne etwas zu speichern."""
+    st.markdown(f"**Probeplan {month_label(month)}** – zeigt, wie die Schichten mit dem aktuellen Stand "
+                "verteilt würden. Es wird nichts gespeichert und nichts veröffentlicht; das Team sieht ihn nicht.")
+    shifts = db.list_shifts(month)
+    team = db.list_users(plannable_only=True)
+    submitted = db.users_with_preferences(month)
+    missing = [u["name"] for u in team if u["id"] not in submitted]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Schichten", len(shifts))
+    c2.metric("Plätze", sum(s["required"] for s in shifts))
+    c3.metric("Angaben abgegeben", f"{len(team) - len(missing)} / {len(team)}")
+
+    if not shifts:
+        st.warning(f"Für {month_label(month)} gibt es noch keine Schichten.")
+        if st.button(f"Spielplan für {month_label(month)} jetzt abrufen und übernehmen", type="primary"):
+            try:
+                perfs = spielplan.parse(spielplan.fetch_html(db.get_setting("spielplan_url")))
+                pv = spielplan.preview(month, perfs)
+                notes = spielplan.apply(pv, published=False)
+                db.audit(admin["id"], "Spielplan übernommen", f"{month}: +{len(pv.new)} (über Probeplan)")
+                st.session_state["trial_notes"] = notes or [f"Keine Vorstellungen für {month_label(month)} "
+                                                           "im Online-Spielplan gefunden."]
+            except Exception as exc:  # noqa: BLE001
+                st.session_state["trial_notes"] = [f"Spielplan konnte nicht abgerufen werden: {exc}"]
+            st.rerun()
+        for n in st.session_state.pop("trial_notes", []):
+            st.info(n)
+        return
+    for n in st.session_state.pop("trial_notes", []):
+        st.info(n)
+    if not team:
+        st.warning("Im Team ist noch niemand als „einplanbar“ markiert (Bereich „Team“).")
+        return
+    if missing:
+        st.caption(f"Ohne eigene Angaben ({len(missing)}): {', '.join(missing)}. Für sie gelten die Angaben "
+                   "aus dem Vormonat bzw. Standardwerte (alle Tage verfügbar).")
+
+    if st.button("Probeplan berechnen", type="primary", key=f"trial_run_{month}"):
+        with st.spinner("Verteile die Schichten …"):
+            result = planning.run_trial(month)
+        st.session_state[f"trial_{month}"] = result
+        st.session_state[f"trial_xlsx_{month}"] = export_excel.export_regieplan(
+            [month], trial={month: result.assignments})
+
+    result = st.session_state.get(f"trial_{month}")
+    if not result:
+        return
+    gaps = sum(result.unfilled.values())
+    (st.warning if gaps else st.success)(
+        f"Probeplan: {len(result.assignments)} Einsätze, {gaps} Platz/Plätze offen.")
+    for h in result.hints:
+        st.caption("• " + h)
+    st.download_button(f"📥 Probeplan {month_label(month)} als Excel",
+                       st.session_state[f"trial_xlsx_{month}"],
+                       file_name=f"{date.today().isoformat()}_Probeplan_{month_label(month).replace(' ', '_')}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key=f"trial_dl_{month}")
+    st.dataframe(planning.plan_overview(month, trial=result.assignments), hide_index=True)
 
 
 # ------------------------------------------------------------------ Planung
@@ -82,11 +146,10 @@ def _tab_planning(month: str, status: str, admin: dict) -> None:
         st.info("Lege zuerst Schichten (Tab „Termine & Schichten“) und Team-Mitglieder (Tab „Team“) an.")
         return
 
-    early = False
     if open_ and status != "VEROEFFENTLICHT":
-        early = st.checkbox("Probelauf vor Fristende erlauben (Wünsche können sich noch ändern)")
+        st.caption("Vor Fristende: Für einen Blick vorab den Bereich **„Probeplan“** nutzen.")
     label = "Plan neu erstellen" if status != "OFFEN" else "Plan erstellen"
-    if st.button(label, type="primary", disabled=status == "VEROEFFENTLICHT" or (open_ and not early)):
+    if st.button(label, type="primary", disabled=status == "VEROEFFENTLICHT" or open_):
         with st.spinner("Optimiere die Zuteilung …"):
             result = planning.run_planning(month)
         db.audit(admin["id"], "Plan erstellt", f"{month}: {result.status}, Lücken {sum(result.unfilled.values())}"
@@ -356,7 +419,8 @@ def _tab_team(current_admin: dict) -> None:
     df = pd.DataFrame([{
         "id": u["id"], "Name": u["name"], "E-Mail": u["email"],
         "Admin": bool(u["is_admin"]), "Einplanbar": bool(u["plannable"]), "Minijob": bool(u["is_minijob"]),
-        "Stundenlohn €": u["hourly_wage"], "Aktiv": bool(u["active"]),
+        "Stundenlohn €": u["hourly_wage"] if u["hourly_wage"] is not None else float("nan"),
+        "Aktiv": bool(u["active"]),
         "Zugang": ("Passwort" + (" + 2FA" if u.get("totp_secret") else "")) if u.get("password_hash") else "offen",
     } for u in users], columns=cols)
     edited = st.data_editor(df, num_rows="dynamic", hide_index=True, key="team_editor", disabled=["Zugang"],

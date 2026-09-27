@@ -84,15 +84,25 @@ def run_planning(month: str) -> SolveResult:
     return result
 
 
+def run_trial(month: str) -> SolveResult:
+    """Probeplan: rechnet mit dem aktuellen Stand, speichert aber nichts (kein Entwurf wird überschrieben)."""
+    employees, shifts = build_inputs(month)
+    return solve(
+        employees, shifts,
+        minijob_limit_eur=float(db.get_setting("minijob_grenze")),
+        max_shifts_per_day=int(db.get_setting("max_schichten_pro_tag")),
+        time_limit_s=min(15.0, float(db.get_setting("solver_zeitlimit_s"))),
+    )
+
+
 def publish(month: str) -> None:
     db.set_plan_status(month, "VEROEFFENTLICHT")
     db.write_history_from_assignments(month)
 
 
-def plan_overview(month: str) -> pd.DataFrame:
-    assigned: dict[int, list[str]] = {}
-    for a in db.get_assignments(month):
-        assigned.setdefault(a["shift_id"], []).append(a["name"])
+def plan_overview(month: str, trial: list[tuple[int, int]] | None = None) -> pd.DataFrame:
+    from .export_excel import assignment_names
+    assigned = assignment_names(month, trial)
     rows = []
     for s in db.list_shifts(month):
         names = assigned.get(s["id"], [])

@@ -42,11 +42,22 @@ ALIGN_HEADER = Alignment(horizontal="left", vertical="top", wrap_text=True)
 OPEN = "offen"
 
 
-def _day_data(month: str) -> dict[str, dict]:
-    """Sammelt pro Tag: Vorstellungen (mit Einlass/Abendkasse) und Tageskasse."""
+def assignment_names(month: str, trial: list[tuple[int, int]] | None = None) -> dict[int, list[str]]:
+    """Namen je Schicht – aus dem gespeicherten Plan oder aus einer Probe-Zuteilung (shift_id, user_id)."""
     names: dict[int, list[str]] = defaultdict(list)
-    for a in db.get_assignments(month):
-        names[a["shift_id"]].append(a["name"])
+    if trial is None:
+        for a in db.get_assignments(month):
+            names[a["shift_id"]].append(a["name"])
+    else:
+        user_name = {u["id"]: u["name"] for u in db.list_users()}
+        for sid, uid in trial:
+            names[sid].append(user_name.get(uid, "?"))
+    return names
+
+
+def _day_data(month: str, trial: list[tuple[int, int]] | None = None) -> dict[str, dict]:
+    """Sammelt pro Tag: Vorstellungen (mit Einlass/Abendkasse) und Tageskasse."""
+    names = assignment_names(month, trial)
     perfs = {p["id"]: p for p in db.list_performances(month)}
     days: dict[str, dict] = defaultdict(lambda: {"events": {}, "tageskasse": []})
 
@@ -71,15 +82,15 @@ def _day_data(month: str) -> dict[str, dict]:
     return days
 
 
-def _write_month(ws, month: str) -> None:
-    ws.title = month_label(month)[:31]
+def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> None:
+    ws.title = (("Probe " if trial is not None else "") + month_label(month))[:31]
     for h, c in COL.items():
         cell = ws.cell(row=1, column=c, value=h)
         cell.font, cell.fill, cell.alignment = FONT_BOLD, FILL_HEADER, ALIGN_HEADER
         cell.border = Border(left=THIN, right=THIN, top=THIN, bottom=MEDIUM)
     ws.row_dimensions[1].height = HEADER_HEIGHT
 
-    data = _day_data(month)
+    data = _day_data(month, trial)
     _, m = parse_month(month)
     row = 2
     for d in (d for w in month_weeks(month) for d in w if d.month == m):
@@ -119,7 +130,8 @@ def _write_month(ws, month: str) -> None:
         ws.cell(row=row - 1, column=c).border = Border(
             left=THIN, right=THIN, top=ws.cell(row=row - 1, column=c).border.top, bottom=MEDIUM)
     legend = ws.cell(row=row + 1, column=1,
-                     value="Hellblau = aus dem Schichtplaner (Änderungen bitte in der App vornehmen und neu "
+                     value=("PROBEPLAN – nicht veröffentlicht, Angaben können sich noch ändern · "
+                            if trial is not None else "") + "Hellblau = aus dem Schichtplaner (Änderungen bitte in der App vornehmen und neu "
                            "exportieren) · Weiß = frei ausfüllbar (Technik, ASL, Proben, Sonstiges) · "
                            "„offen“ = noch unbesetzt")
     legend.font = FONT_LEGEND
@@ -136,12 +148,12 @@ def _write_month(ws, month: str) -> None:
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
 
-def export_regieplan(months: list[str]) -> bytes:
-    """Excel-Datei mit einem Tabellenblatt je Monat (in der übergebenen Reihenfolge)."""
+def export_regieplan(months: list[str], trial: dict[str, list[tuple[int, int]]] | None = None) -> bytes:
+    """Excel-Datei mit einem Tabellenblatt je Monat. trial = {Monat: Probe-Zuteilung} für einen Probeplan."""
     wb = Workbook()
     wb.remove(wb.active)
     for month in months:
-        _write_month(wb.create_sheet(), month)
+        _write_month(wb.create_sheet(), month, (trial or {}).get(month))
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
