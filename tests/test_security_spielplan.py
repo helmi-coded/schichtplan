@@ -60,7 +60,8 @@ def test_spielplan():
     assert len(pv.new) == 4
     spielplan.apply(pv, published=False)
     assert len(db.list_performances("2026-10")) == 4
-    assert db.count_shifts_of_type("2026-10", "TAGESKASSE") == 27     # Mo–Sa im Oktober 2026
+    assert db.count_shifts_of_type("2026-10", "TAGESKASSE") == 26     # Mo–Sa im Oktober 2026 ohne 03.10.
+    assert db.count_shifts_of_type("2026-10", "TECHNIK") == 4         # 1 Technik je Vorstellung
     pv2 = spielplan.preview("2026-10", perfs[1:])                    # ein Termin entfällt
     assert len(pv2.removed) == 1 and not pv2.new
     spielplan.apply(pv2, published=False)

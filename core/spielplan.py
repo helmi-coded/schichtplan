@@ -9,7 +9,7 @@ Der Parser sucht dieses Muster im Text. Er hängt deshalb nicht an CSS-Klassen u
 Abgleich pro Monat:
   neu       -> Aufführung + Schichten laut Vorlage anlegen
   entfallen -> Aufführung inkl. Schichten löschen (bei veröffentlichtem Plan nur melden)
-  Tageskasse wird einmalig pro Monat nach eigener Vorlage erzeugt (Mo–Sa 11–13 Uhr).
+  Danach Schicht-Check: Tageskasse Mo–Sa ohne Feiertage, fehlende Schichtarten je Vorstellung.
 """
 import json
 import re
@@ -19,7 +19,7 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-from . import db
+from . import completeness, db
 from .calendar_utils import month_weeks, parse_month
 from .importer import apply_offset
 
@@ -130,20 +130,5 @@ def apply(pv: SyncPreview, published: bool) -> list[str]:
         db.delete_performance(p["id"])
     if pv.new or pv.removed:
         notes.insert(0, f"{len(pv.new)} Aufführung(en) neu, {len(pv.removed)} entfallen.")
-    notes += ensure_tageskasse(pv.month)
+    notes += completeness.complete(pv.month)      # Tageskasse + fehlende Schichtarten, Feiertage
     return notes
-
-
-def ensure_tageskasse(month: str) -> list[str]:
-    """Legt die Tageskasse-Schichten des Monats an, falls noch keine existieren."""
-    cfg = json.loads(db.get_setting("tageskasse_vorlage"))
-    if not cfg.get("aktiv") or db.count_shifts_of_type(month, "TAGESKASSE"):
-        return []
-    _, m = parse_month(month)
-    n = 0
-    for week in month_weeks(month):
-        for d in week:
-            if d.month == m and d.weekday() in cfg["wochentage"]:
-                db.add_shift(d.isoformat(), "TAGESKASSE", cfg["beginn"], cfg["ende"], int(cfg["anzahl"]))
-                n += 1
-    return [f"{n} Tageskasse-Schichten angelegt (Feiertage bitte manuell löschen)."] if n else []

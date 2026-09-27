@@ -21,6 +21,7 @@ TYPE_ALIASES = {
     "kasse": "ABENDKASSE",
     "einlass": "EINLASS",
     "einlassdienst": "EINLASS",
+    "technik": "TECHNIK",
 }
 DATE_FORMATS = ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]
 

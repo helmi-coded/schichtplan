@@ -1,7 +1,7 @@
 """Service-Schicht zwischen Datenbank, Solver und Oberfläche."""
 import pandas as pd
 
-from . import db
+from . import completeness, db
 from .calendar_utils import (WEEKDAYS, add_months, fmt_date, fmt_eur, is_weekend, parse_month,
                              previous_month, shift_hours, shift_interval, weekday)
 from .constants import SHIFT_TYPES
@@ -60,6 +60,7 @@ def build_inputs(month: str) -> tuple[list[EmployeeInput], list[ShiftInput]]:
 
 def run_planning(month: str) -> SolveResult:
     """Berechnet den Plan, speichert ihn als Entwurf und gibt das Solver-Ergebnis zurück."""
+    check_notes = completeness.complete(month)            # fehlende Schichten vorher ergänzen
     employees, shifts = build_inputs(month)
     result = solve(
         employees, shifts,
@@ -67,6 +68,7 @@ def run_planning(month: str) -> SolveResult:
         max_shifts_per_day=int(db.get_setting("max_schichten_pro_tag")),
         time_limit_s=float(db.get_setting("solver_zeitlimit_s")),
     )
+    result.hints[:0] = check_notes
     if result.assignments or not result.unfilled:
         db.save_assignments(month, result.assignments)
         db.set_plan_status(month, "ENTWURF")
@@ -85,14 +87,18 @@ def run_planning(month: str) -> SolveResult:
 
 
 def run_trial(month: str) -> SolveResult:
-    """Probeplan: rechnet mit dem aktuellen Stand, speichert aber nichts (kein Entwurf wird überschrieben)."""
+    """Probeplan: rechnet mit dem aktuellen Stand, speichert keinen Plan (kein Entwurf wird überschrieben).
+    Fehlende Schichten (Tageskasse, Technik …) werden vorher ergänzt."""
+    check_notes = completeness.complete(month)
     employees, shifts = build_inputs(month)
-    return solve(
+    result = solve(
         employees, shifts,
         minijob_limit_eur=float(db.get_setting("minijob_grenze")),
         max_shifts_per_day=int(db.get_setting("max_schichten_pro_tag")),
         time_limit_s=min(15.0, float(db.get_setting("solver_zeitlimit_s"))),
     )
+    result.hints[:0] = check_notes
+    return result
 
 
 def publish(month: str) -> None:
@@ -148,7 +154,8 @@ def hours_account(month: str) -> pd.DataFrame:
             status = "🟢"
         rows.append({
             "Name": u["name"],
-            "Einsatz": {"KASSE": "Kasse", "EINLASS": "Einlass", "BEIDE": "beides"}[prefs[u["id"]]["role_choice"]],
+            "Einsatz": {"KASSE": "Kasse", "EINLASS": "Einlass", "BEIDE": "Kasse & Einlass",
+                        "TECHNIK": "Technik"}.get(prefs[u["id"]]["role_choice"], "–"),
             "Schichten": acc["n"],
             "davon WE": acc["we"],
             "Stunden": round(acc["h"], 2),

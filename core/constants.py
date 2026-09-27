@@ -17,6 +17,7 @@ SHIFT_TYPES = {
     "TAGESKASSE": "Tageskasse",
     "ABENDKASSE": "Abendkasse",
     "EINLASS": "Einlass",
+    "TECHNIK": "Technik",
 }
 
 # Welche Rolle darf welche Schichtart übernehmen (harte Restriktion)
@@ -24,6 +25,7 @@ ALLOWED_TYPES = {
     "KASSE": {"TAGESKASSE", "ABENDKASSE"},
     "EINLASS": {"EINLASS"},
     "BEIDE": {"TAGESKASSE", "ABENDKASSE", "EINLASS"},
+    "TECHNIK": {"TECHNIK"},
 }
 
 # Wochenend-Ausschluss: maximal EIN Wochenendtag kann hart ausgeschlossen werden
@@ -58,11 +60,13 @@ PLAN_STATUS = {
 # Vorlage: aus einer Aufführung (Datum + Beginn) werden Schichten erzeugt.
 # Offsets in Minuten relativ zum Vorstellungsbeginn.
 # Abendkasse: laut Website 2 Stunden vor Vorstellungsbeginn geöffnet.
+# Technik: 1 Person je Vorstellung, Zeiten wie Einlass (Annahme, in der Vorlage anpassbar).
 # Einlass: beginnt 2 Stunden vorher und dauert bis ca. 1 Stunde nach Vorstellungsende
 # -> pauschal 5 Stunden (Beginn -120 Min., Ende +180 Min.). In der Vorlage anpassbar.
 DEFAULT_TEMPLATE = [
     {"schichtart": "ABENDKASSE", "start_offset_min": -120, "end_offset_min": 15, "anzahl": 1},
     {"schichtart": "EINLASS", "start_offset_min": -120, "end_offset_min": 180, "anzahl": 2},
+    {"schichtart": "TECHNIK", "start_offset_min": -120, "end_offset_min": 180, "anzahl": 1},
 ]
 
 # Tageskasse: laut Website Mo–Sa 11:00–13:00 Uhr (Wochentage 0 = Mo ... 5 = Sa)

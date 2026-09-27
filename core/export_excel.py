@@ -5,8 +5,8 @@ Spalten wie im bestehenden Regieplan des Theaters:
   Abendkasse | Proben (+Sperrtermine) | Sonstiges
 
 Jeder Tag ist ein Block aus mindestens 3 Zeilen (mehr, wenn mehr Namen nötig sind),
-getrennt durch eine dickere Linie. Hellblau = von der App ausgefüllt, weiß = frei für
-Technik, ASL, Proben und Sonstiges. Unbesetzte Plätze erscheinen rot als „offen".
+getrennt durch eine dickere Linie. Hellblau = von der App ausgefüllt (inkl. Technik), weiß = frei für
+ASL, Proben und Sonstiges. Unbesetzte Plätze erscheinen rot als „offen".
 """
 import io
 from collections import defaultdict
@@ -22,8 +22,9 @@ from .calendar_utils import WEEKDAYS, month_label, month_weeks, parse_month
 HEADERS = ["Datum", "Tag", "Uhrzeit", "Vorstellungen/Bühne", "Technik", "ASL", "Einlass",
            "Tageskasse", "Abendkasse", "Proben (+Sperrtermine)", "Sonstiges"]
 COL = {h: i + 1 for i, h in enumerate(HEADERS)}
-APP_COLUMNS = {"Datum", "Tag", "Uhrzeit", "Vorstellungen/Bühne", "Einlass", "Tageskasse", "Abendkasse"}
-TYPE_COLUMN = {"EINLASS": "Einlass", "ABENDKASSE": "Abendkasse"}
+APP_COLUMNS = {"Datum", "Tag", "Uhrzeit", "Vorstellungen/Bühne", "Technik", "Einlass", "Tageskasse", "Abendkasse"}
+TYPE_COLUMN = {"EINLASS": "Einlass", "ABENDKASSE": "Abendkasse", "TECHNIK": "Technik"}
+EVENT_COLUMNS = ("Technik", "Einlass", "Abendkasse")
 # Spaltenbreiten: gleicher Spaltentyp = gleiche Breite, mindestens 13
 WIDTHS = {"Datum": 13, "Tag": 13, "Uhrzeit": 13, "Vorstellungen/Bühne": 34, "Technik": 18, "ASL": 18,
           "Einlass": 18, "Tageskasse": 18, "Abendkasse": 18, "Proben (+Sperrtermine)": 34, "Sonstiges": 34}
@@ -63,7 +64,7 @@ def _day_data(month: str, trial: list[tuple[int, int]] | None = None) -> dict[st
 
     for p in perfs.values():                                   # auch Vorstellungen ohne Schichten zeigen
         days[p["date"]]["events"][("p", p["id"])] = {"time": p["time"], "title": p["title"],
-                                                     "Einlass": [], "Abendkasse": []}
+                                                     **{c: [] for c in EVENT_COLUMNS}}
     for s in db.list_shifts(month):
         staffed = sorted(names.get(s["id"], []))
         staffed += [OPEN] * max(0, s["required"] - len(staffed))
@@ -77,7 +78,7 @@ def _day_data(month: str, trial: list[tuple[int, int]] | None = None) -> dict[st
         else:                                                  # Schicht ohne verknüpfte Vorstellung
             key = ("t", s["title"] or "")
             ev = days[s["date"]]["events"].setdefault(key, {"time": "", "title": s["title"] or "",
-                                                            "Einlass": [], "Abendkasse": []})
+                                                            **{c: [] for c in EVENT_COLUMNS}})
         ev[TYPE_COLUMN[s["shift_type"]]] += staffed
     return days
 
@@ -101,8 +102,8 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
         for ev in sorted(day["events"].values(), key=lambda e: (e["time"] or "99", e["title"])):
             ws.cell(row=ptr, column=COL["Uhrzeit"], value=ev["time"] or None)
             ws.cell(row=ptr, column=COL["Vorstellungen/Bühne"], value=ev["title"])
-            height = max(1, len(ev["Einlass"]), len(ev["Abendkasse"]))
-            for col in ("Einlass", "Abendkasse"):
+            height = max(1, *(len(ev[c]) for c in EVENT_COLUMNS))
+            for col in EVENT_COLUMNS:
                 for i, name in enumerate(ev[col]):
                     ws.cell(row=ptr + i, column=COL[col], value=name)
             ptr += height
@@ -132,7 +133,7 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
     legend = ws.cell(row=row + 1, column=1,
                      value=("PROBEPLAN – nicht veröffentlicht, Angaben können sich noch ändern · "
                             if trial is not None else "") + "Hellblau = aus dem Schichtplaner (Änderungen bitte in der App vornehmen und neu "
-                           "exportieren) · Weiß = frei ausfüllbar (Technik, ASL, Proben, Sonstiges) · "
+                           "exportieren) · Weiß = frei ausfüllbar (ASL, Proben, Sonstiges) · "
                            "„offen“ = noch unbesetzt")
     legend.font = FONT_LEGEND
     legend.alignment = Alignment(horizontal="left", vertical="top", wrap_text=False)

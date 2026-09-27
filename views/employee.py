@@ -64,15 +64,16 @@ def _render_calendar(user: dict, month: str, locked: bool, role: str) -> None:
         saved = db.get_blocked_days(user["id"], month)
         st.session_state[saved_key] = dict(saved)
         st.session_state[cur_key] = dict(saved)
-    simple = role == "EINLASS"
+    simple = role in ("EINLASS", "TECHNIK")          # beides gibt es nur abends bei Vorstellungen
     if simple:
         st.caption("Stell bei jedem Tag, an dem du **nicht** kannst, **✕** ein – der Tag wird rot. "
-                   "🎭 = Vorstellung.")
+                   "🎭 = Vorstellung (nur an diesen Tagen wird "
+                   f"{'Technik' if role == 'TECHNIK' else 'Einlass'} gebraucht).")
     else:
         st.caption("Pro Tag: **✓** kann ganztags · **☀** nur tagsüber (Tageskasse) · "
                    "**🌙** nur abends (Abendkasse/Einlass) · **✕** gar nicht. "
                    "Rot = gar nicht, gelb = nur teilweise. 🎭 = Vorstellung.")
-    shift_days = db.shift_dates_for_types(month, {"ABENDKASSE", "EINLASS"})
+    shift_days = db.shift_dates_for_types(month, {"ABENDKASSE", "EINLASS", "TECHNIK"})
     _calendar_fragment(user["id"], month, shift_days, locked, simple)
 
 
@@ -86,7 +87,7 @@ def _calendar_fragment(user_id: int, month: str, shift_days: set[str], locked: b
     _, m = parse_month(month)
     days_in_month = [d for w in month_weeks(month) for d in w if d.month == m]
 
-    def _free_all() -> None:
+    def _free_all() -> None:  # noqa: D401
         cur.clear()
         for d in days_in_month:
             st.session_state[f"day_{month}_{user_id}_{mode}_{d.isoformat()}"] = "✓"
@@ -136,7 +137,7 @@ def _calendar_fragment(user_id: int, month: str, shift_days: set[str], locked: b
 
 
 # ------------------------------------------------------------------ Präferenzen
-CHOICE_LABELS = {"BEIDE": "Kasse & Einlass", "KASSE": "nur Kasse", "EINLASS": "nur Einlass"}
+CHOICE_LABELS = {"BEIDE": "Kasse & Einlass", "KASSE": "nur Kasse", "EINLASS": "nur Einlass", "TECHNIK": "Technik"}
 EXCLUDED_DAY = {"SA": 5, "SO": 6}
 
 
@@ -144,7 +145,8 @@ def summary_text(pr: dict) -> str:
     """Fasst die Angaben in einem Satz zusammen – so, wie die Planung sie versteht."""
     parts = [{"BEIDE": "Du machst diesen Monat **Kasse und Einlass**",
               "KASSE": "Du machst diesen Monat **nur Kasse** (Tages- und Abendkasse)",
-              "EINLASS": "Du machst diesen Monat **nur Einlass**"}[pr["role_choice"]]]
+              "EINLASS": "Du machst diesen Monat **nur Einlass**",
+              "TECHNIK": "Du machst diesen Monat **Technik**"}[pr["role_choice"]]]
     mn, mx = pr["min_shifts"], pr["max_shifts"]
     if mx == 0:
         parts.append("aber **keine Schichten** (du setzt diesen Monat aus)")
@@ -198,7 +200,7 @@ def _render_preferences(user: dict, month: str, locked: bool) -> tuple[dict, lis
     choice = st.radio("**1. Was möchtest du diesen Monat machen?**", list(CHOICE_LABELS),
                       index=list(CHOICE_LABELS).index(p["role_choice"]), format_func=CHOICE_LABELS.get,
                       horizontal=True, disabled=locked, key=f"role_{month}",
-                      help="Kasse umfasst Tages- und Abendkasse.")
+                      help="Kasse umfasst Tages- und Abendkasse. Technik gibt es nur an Vorstellungstagen.")
     chosen = [t for t in SHIFT_TYPES if t in ALLOWED_TYPES[choice]]
 
     # 2) Umfang

@@ -27,7 +27,7 @@ def main(month: str) -> None:
         aid = db.upsert_user(None, "admin@theater.example", "Theaterleitung", "BEIDE", is_admin=True, plannable=False)
         db.set_password_hash(aid, demo_hash)
 
-    roles = ["KASSE"] * 6 + ["EINLASS"] * 10 + ["BEIDE"] * 8
+    roles = ["KASSE"] * 6 + ["EINLASS"] * 9 + ["BEIDE"] * 7 + ["TECHNIK"] * 2
     ids = []
     for i, (first, role) in enumerate(zip(FIRST, roles)):
         email = f"{first.lower()}@theater.example"

@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from core import auth, db, deadline, export_excel, importer, mailer, planning, spielplan
+from core import auth, completeness, db, deadline, export_excel, importer, mailer, planning, spielplan
 from core.solver import blocks
 from core.calendar_utils import (WEEKDAYS, now_local, fmt_date, fmt_eur, month_label, month_weeks,
                                  parse_month, previous_month, weekday)
@@ -248,10 +248,56 @@ def _manual_correction(month: str, status: str) -> None:
             st.rerun()
 
 
+# ------------------------------------------------------------------ Schicht-Check
+def _render_shift_check(month: str) -> None:
+    """Übersicht: Sind alle Schichten des Monats angelegt? Mit Button zum Ergänzen."""
+    res = completeness.check(month)
+    st.subheader(f"Schicht-Check {month_label(month)}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Vorstellungen", res.performances)
+    c2.metric("Tageskasse", f"{len(res.tk_expected) - len(res.tk_missing)} / {len(res.tk_expected)} Tage")
+    c3.metric("Feiertage (BW)", len(res.holidays))
+
+    if res.holidays:
+        st.caption("Feiertage – keine Tageskasse: " +
+                   ", ".join(f"{WEEKDAYS[weekday(d)]} {fmt_date(d)} {n}" for d, n in res.holidays.items()))
+    if res.ok:
+        if res.performances or res.tk_expected:
+            st.success("✅ Alles vollständig: Jeder Tag Mo–Sa hat eine Tageskasse, jede Vorstellung hat "
+                       "Abendkasse, Einlass und Technik.")
+    else:
+        problems = []
+        if res.tk_missing:
+            problems.append(f"Tageskasse fehlt an {len(res.tk_missing)} Tag(en): " +
+                            ", ".join(fmt_date(d) for d in res.tk_missing[:10]) +
+                            (" …" if len(res.tk_missing) > 10 else ""))
+        if res.perf_missing:
+            by_type: dict[str, int] = {}
+            for _, t in res.perf_missing:
+                by_type[t] = by_type.get(t, 0) + 1
+            problems.append("Bei Vorstellungen fehlen: " +
+                            ", ".join(f"{n}× {SHIFT_TYPES[t]}" for t, n in by_type.items()))
+        if res.tk_on_holiday:
+            problems.append("Tageskasse an Feiertag angelegt: " +
+                            ", ".join(fmt_date(s["date"]) for s in res.tk_on_holiday))
+        st.warning("⚠️ " + " · ".join(problems))
+        if st.button("Fehlende Schichten jetzt ergänzen", type="primary", key=f"complete_{month}"):
+            notes = completeness.complete(month)
+            db.audit(st.session_state.get("user_id"), "Schichten ergänzt", f"{month}: " + " ".join(notes))
+            st.session_state["check_notes"] = notes
+            st.rerun()
+    for n in st.session_state.pop("check_notes", []):
+        st.info(n)
+    st.caption("Wird automatisch auch beim Spielplan-Abruf, beim Probeplan und bei „Plan erstellen“ ausgeführt.")
+    st.divider()
+
+
 # ------------------------------------------------------------------ Termine & Schichten
 def _tab_shifts(month: str) -> None:
     template = json.loads(db.get_setting("schicht_vorlage"))
     status = db.get_plan_status(month)
+
+    _render_shift_check(month)
 
     st.subheader("Online-Spielplan übernehmen")
     url = db.get_setting("spielplan_url")

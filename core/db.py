@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,                    -- YYYY-MM-DD
     title       TEXT,
-    shift_type  TEXT NOT NULL CHECK (shift_type IN ('TAGESKASSE','ABENDKASSE','EINLASS')),
+    shift_type  TEXT NOT NULL CHECK (shift_type IN ('TAGESKASSE','ABENDKASSE','EINLASS','TECHNIK')),
     start_time  TEXT NOT NULL,                    -- HH:MM
     end_time    TEXT NOT NULL,                    -- HH:MM (kleiner als Start = nach Mitternacht)
     required    INTEGER NOT NULL DEFAULT 1
@@ -271,8 +271,57 @@ def init_db(force: bool = False) -> None:
                 if col not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_shifts_perf ON shifts(performance_id)")
+        _allow_technik(c)
         for k, v in DEFAULT_SETTINGS.items():
             c.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING", (k, v))
+        _add_technik_to_template(c)
+
+
+def _allow_technik(c) -> None:
+    """Migration: ältere Datenbanken erlauben die Schichtart TECHNIK noch nicht (CHECK-Regel)."""
+    if IS_POSTGRES:
+        rows = c.execute("""SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+                            WHERE conrelid = 'shifts'::regclass AND contype = 'c'""").fetchall()
+        for r in rows:
+            if "shift_type" in r["def"] and "TECHNIK" not in r["def"]:
+                c.execute(f'ALTER TABLE shifts DROP CONSTRAINT "{r["conname"]}"')
+                c.execute("ALTER TABLE shifts ADD CONSTRAINT shifts_shift_type_check CHECK "
+                          "(shift_type IN ('TAGESKASSE','ABENDKASSE','EINLASS','TECHNIK'))")
+        return
+    sql = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='shifts'").fetchone()[0]
+    if "TECHNIK" in sql:
+        return
+    # SQLite kann CHECK-Regeln nicht ändern -> offizielles Vorgehen: neue Tabelle anlegen, Daten
+    # kopieren, alte löschen, neue umbenennen. Fremdschlüssel dabei kurz aus, damit Zuteilungen
+    # nicht per CASCADE gelöscht werden; Verweise anderer Tabellen auf "shifts" bleiben gültig.
+    raw = c.raw
+    raw.commit()
+    raw.execute("PRAGMA foreign_keys = OFF")
+    new_sql = sql.replace("'EINLASS')", "'EINLASS','TECHNIK')")
+    new_sql = new_sql.replace("CREATE TABLE shifts", "CREATE TABLE shifts_new", 1)
+    raw.execute(new_sql)
+    cols = [r[1] for r in raw.execute("PRAGMA table_info(shifts)")]
+    raw.execute(f"INSERT INTO shifts_new({','.join(cols)}) SELECT {','.join(cols)} FROM shifts")
+    raw.execute("DROP TABLE shifts")
+    raw.execute("ALTER TABLE shifts_new RENAME TO shifts")
+    raw.execute("CREATE INDEX IF NOT EXISTS idx_shifts_date ON shifts(date)")
+    raw.execute("CREATE INDEX IF NOT EXISTS idx_shifts_perf ON shifts(performance_id)")
+    raw.commit()
+    raw.execute("PRAGMA foreign_keys = ON")
+
+
+def _add_technik_to_template(c) -> None:
+    """Migration: Technik-Zeile einmalig in bestehende Schicht-Vorlagen aufnehmen."""
+    done = c.execute("SELECT value FROM settings WHERE key = 'migration_technik'").fetchone()
+    if done:
+        return
+    row = c.execute("SELECT value FROM settings WHERE key = 'schicht_vorlage'").fetchone()
+    if row:
+        tpl = json.loads(row["value"])
+        if not any(t["schichtart"] == "TECHNIK" for t in tpl):
+            tpl.append({"schichtart": "TECHNIK", "start_offset_min": -120, "end_offset_min": 180, "anzahl": 1})
+            c.execute("UPDATE settings SET value = ? WHERE key = 'schicht_vorlage'", (json.dumps(tpl),))
+    c.execute("INSERT INTO settings(key, value) VALUES ('migration_technik', '1') ON CONFLICT(key) DO NOTHING")
 
 
 # ---------------------------------------------------------------- Settings
@@ -657,6 +706,17 @@ def assignments_for_performance(performance_id: int) -> int:
     with get_conn() as c:
         return c.execute("""SELECT COUNT(*) FROM assignments a JOIN shifts s ON s.id = a.shift_id
                             WHERE s.performance_id = ?""", (performance_id,)).fetchone()[0]
+
+
+def delete_unassigned_shifts(shift_ids: list[int]) -> int:
+    """Löscht nur Schichten ohne Zuteilung. Rückgabe: Anzahl gelöschter Schichten."""
+    n = 0
+    with get_conn() as c:
+        for sid in shift_ids:
+            if not c.execute("SELECT 1 FROM assignments WHERE shift_id = ?", (sid,)).fetchone():
+                c.execute("DELETE FROM shifts WHERE id = ?", (sid,))
+                n += 1
+    return n
 
 
 def count_shifts_of_type(month: str, shift_type: str) -> int:
