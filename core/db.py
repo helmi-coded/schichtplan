@@ -210,6 +210,10 @@ CREATE TABLE IF NOT EXISTS performances (
     source       TEXT NOT NULL DEFAULT 'web',   -- web = aus dem Online-Spielplan
     external_key TEXT UNIQUE                    -- Datum+Uhrzeit+Titel für den Abgleich
 );
+CREATE TABLE IF NOT EXISTS closed_days (
+    date   TEXT PRIMARY KEY,                    -- Schließtag: keine Schichten, im Excel rot
+    reason TEXT
+);
 CREATE TABLE IF NOT EXISTS invite_codes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -235,7 +239,8 @@ MIGRATIONS = {
         "locked_until": "TEXT",
         "last_login": "TEXT",
     },
-    "shifts": {"performance_id": "INTEGER REFERENCES performances(id) ON DELETE CASCADE"},
+    "shifts": {"performance_id": "INTEGER REFERENCES performances(id) ON DELETE CASCADE",
+               "not_needed": "INTEGER NOT NULL DEFAULT 0"},     # 1 = bewusst nicht benötigt
     "plan_status": {"deadline_override": "TEXT"},
     # part: GANZ = ganzer Tag gesperrt, TAG = tagsüber gesperrt (nur abends möglich),
     #       ABEND = abends gesperrt (nur tagsüber möglich)
@@ -582,9 +587,50 @@ def shift_dates_for_types(month: str, types: set[str]) -> set[str]:
         return set()
     marks = ",".join("?" * len(types))
     with get_conn() as c:
-        rows = c.execute(f"SELECT DISTINCT date FROM shifts WHERE date LIKE ? AND shift_type IN ({marks})",
+        rows = c.execute(f"""SELECT DISTINCT date FROM shifts WHERE date LIKE ? AND shift_type IN ({marks})
+                              AND not_needed = 0 AND date NOT IN (SELECT date FROM closed_days)""",
                          (f"{month}-%", *types))
         return {r["date"] for r in rows}
+
+
+# ---------------------------------------------------------------- Schließtage / nicht benötigt
+def list_closed_days(month: str) -> dict[str, str]:
+    with get_conn() as c:
+        rows = c.execute("SELECT date, reason FROM closed_days WHERE date LIKE ? ORDER BY date", (f"{month}-%",))
+        return {r["date"]: r["reason"] or "" for r in rows}
+
+
+def set_closed_days(dates: list[str], reason: str) -> None:
+    """Markiert Tage als Schließtag und entfernt vorhandene Zuteilungen an diesen Tagen."""
+    with get_conn() as c:
+        for d in dates:
+            c.execute("INSERT INTO closed_days(date, reason) VALUES (?, ?) "
+                      "ON CONFLICT(date) DO UPDATE SET reason = excluded.reason", (d, reason))
+            c.execute("DELETE FROM assignments WHERE shift_id IN (SELECT id FROM shifts WHERE date = ?)", (d,))
+
+
+def remove_closed_days(dates: list[str]) -> None:
+    with get_conn() as c:
+        for d in dates:
+            c.execute("DELETE FROM closed_days WHERE date = ?", (d,))
+
+
+def set_shifts_not_needed(shift_ids: list[int], value: bool) -> None:
+    """Markiert Schichten als (nicht) benötigt; bei „nicht benötigt“ werden Zuteilungen entfernt."""
+    with get_conn() as c:
+        for sid in shift_ids:
+            c.execute("UPDATE shifts SET not_needed = ? WHERE id = ?", (int(value), sid))
+            if value:
+                c.execute("DELETE FROM assignments WHERE shift_id = ?", (sid,))
+
+
+def list_active_shifts(month: str) -> list[dict]:
+    """Schichten, die tatsächlich besetzt werden sollen (ohne „nicht benötigt“ und ohne Schließtage)."""
+    with get_conn() as c:
+        rows = c.execute("""SELECT * FROM shifts WHERE date LIKE ? AND not_needed = 0
+                            AND date NOT IN (SELECT date FROM closed_days)
+                            ORDER BY date, start_time, shift_type""", (f"{month}-%",))
+        return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------- Zuteilungen
@@ -788,7 +834,7 @@ def list_audit(limit: int = 200) -> list[dict]:
 def export_all() -> dict:
     """Komplette Datensicherung als dict (für JSON-Download). Passwort-Hashes und 2FA-Schlüssel
     werden bewusst NICHT exportiert."""
-    tables = ["users", "shifts", "performances", "blocked_days", "preferences", "assignments",
+    tables = ["users", "shifts", "performances", "closed_days", "blocked_days", "preferences", "assignments",
               "plan_status", "history", "settings", "audit_log"]
     out = {}
     with get_conn() as c:

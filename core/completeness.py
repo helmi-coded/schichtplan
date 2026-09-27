@@ -5,6 +5,8 @@
 - Vorstellungen: Jede Vorstellung bekommt alle Schichten laut Vorlage (Abendkasse, Einlass,
   Technik). Fehlt eine Schichtart, z. B. Technik bei älteren Vorstellungen, wird sie ergänzt.
 - Tageskasse an Feiertagen wird entfernt, sofern noch niemand eingeteilt ist.
+- Schließtage und Schichten, die als „nicht benötigt“ markiert sind, werden nie ergänzt
+  oder verteilt – so kommt nichts zurück, was die Verwaltung bewusst herausgenommen hat.
 
 Die Prüfung läuft automatisch beim Spielplan-Abruf, beim Probeplan und bei „Plan erstellen“
 und kann im Bereich „Termine & Schichten“ jederzeit von Hand ausgelöst werden.
@@ -24,6 +26,8 @@ class MonthCheck:
     tk_expected: list[str] = field(default_factory=list)              # Tage mit Tageskasse (Soll)
     tk_missing: list[str] = field(default_factory=list)               # davon ohne Tageskasse
     tk_on_holiday: list[dict] = field(default_factory=list)           # Tageskasse an Feiertag
+    closed: dict[str, str] = field(default_factory=dict)              # Schließtage {Datum: Grund}
+    not_needed: list[dict] = field(default_factory=list)              # bewusst nicht benötigte Schichten
     performances: int = 0
     perf_missing: list[tuple[dict, str]] = field(default_factory=list)  # (Vorstellung, Schichtart)
 
@@ -49,21 +53,25 @@ def check(month: str) -> MonthCheck:
         if s.get("performance_id"):
             types_by_perf.setdefault(s["performance_id"], set()).add(s["shift_type"])
 
-    res = MonthCheck(holidays=hol)
+    closed = db.list_closed_days(month)
+    res = MonthCheck(holidays=hol, closed=closed,
+                     not_needed=[s for s in shifts if s.get("not_needed") and s["date"] not in closed])
     if cfg.get("aktiv"):
         for d in (d for w in month_weeks(month) for d in w if d.month == m):
             iso = d.isoformat()
-            if d.weekday() in cfg["wochentage"] and iso not in hol:
+            if d.weekday() in cfg["wochentage"] and iso not in hol and iso not in closed:
                 res.tk_expected.append(iso)
                 if iso not in tk_by_date:
                     res.tk_missing.append(iso)
-    res.tk_on_holiday = [s for d in hol for s in tk_by_date.get(d, [])]
+    res.tk_on_holiday = [s for d in hol for s in tk_by_date.get(d, []) if not s.get("not_needed")]
 
     template_types = [t["schichtart"] for t in json.loads(db.get_setting("schicht_vorlage"))]
     perfs = db.list_performances(month)
     res.performances = len(perfs)
     for p in perfs:
-        have = types_by_perf.get(p["id"], set())
+        if p["date"] in closed:
+            continue                              # Schließtag: nichts ergänzen
+        have = types_by_perf.get(p["id"], set())   # zählt auch „nicht benötigte“ Schichten
         for t in template_types:
             if t not in have:
                 res.perf_missing.append((p, t))

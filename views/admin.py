@@ -1,6 +1,6 @@
 """Admin-Bereich: Team, Termine & Schichten, Planung, Stundenkonto, Rotation, Einstellungen."""
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -45,13 +45,14 @@ def _tab_trial(month: str, admin: dict) -> None:
     st.markdown(f"**Probeplan {month_label(month)}** – zeigt, wie die Schichten mit dem aktuellen Stand "
                 "verteilt würden. Es wird nichts gespeichert und nichts veröffentlicht; das Team sieht ihn nicht.")
     shifts = db.list_shifts(month)
+    active = db.list_active_shifts(month)
     team = db.list_users(plannable_only=True)
     submitted = db.users_with_preferences(month)
     missing = [u["name"] for u in team if u["id"] not in submitted]
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Schichten", len(shifts))
-    c2.metric("Plätze", sum(s["required"] for s in shifts))
+    c1.metric("Schichten", len(active))
+    c2.metric("Plätze", sum(s["required"] for s in active))
     c3.metric("Angaben abgegeben", f"{len(team) - len(missing)} / {len(team)}")
 
     if not shifts:
@@ -105,7 +106,7 @@ def _tab_trial(month: str, admin: dict) -> None:
 # ------------------------------------------------------------------ Planung
 def _tab_planning(month: str, status: str, admin: dict) -> None:
     team = db.list_users(plannable_only=True)
-    shifts = db.list_shifts(month)
+    shifts = db.list_active_shifts(month)
     submitted = db.users_with_preferences(month)
     missing = [u["name"] for u in team if u["id"] not in submitted]
 
@@ -222,7 +223,7 @@ def _tab_planning(month: str, status: str, admin: dict) -> None:
 
 def _manual_correction(month: str, status: str) -> None:
     with st.expander("Einzelne Schicht manuell anpassen"):
-        shifts = db.list_shifts(month)
+        shifts = db.list_active_shifts(month)
         users = db.list_users(plannable_only=True)
         name_by_id = {u["id"]: u["name"] for u in users}
         shift = st.selectbox("Schicht", shifts, format_func=planning.shift_label, key="mc_shift")
@@ -253,10 +254,18 @@ def _render_shift_check(month: str) -> None:
     """Übersicht: Sind alle Schichten des Monats angelegt? Mit Button zum Ergänzen."""
     res = completeness.check(month)
     st.subheader(f"Schicht-Check {month_label(month)}")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Vorstellungen", res.performances)
     c2.metric("Tageskasse", f"{len(res.tk_expected) - len(res.tk_missing)} / {len(res.tk_expected)} Tage")
     c3.metric("Feiertage (BW)", len(res.holidays))
+    c4.metric("Schließtage", len(res.closed))
+    if res.closed:
+        st.caption("Schließtage (keine Schichten): " + ", ".join(
+            f"{fmt_date(d)}{' ' + r if r else ''}" for d, r in res.closed.items()))
+    if res.not_needed:
+        st.caption(f"Nicht benötigt ({len(res.not_needed)}): " + ", ".join(
+            f"{fmt_date(x['date'])} {SHIFT_TYPES[x['shift_type']]}" for x in res.not_needed[:12]) +
+            (" …" if len(res.not_needed) > 12 else "") + " – wird nicht verteilt und nicht wieder ergänzt.")
 
     if res.holidays:
         st.caption("Feiertage – keine Tageskasse: " +
@@ -437,23 +446,78 @@ def _tab_shifts(month: str) -> None:
                     st.success(f"{len(dates)} Schicht(en) angelegt.")
                     st.rerun()
 
+    _render_closed_days(month)
+
     st.subheader(f"Schichten im {month_label(month)}")
+    st.caption("**Nicht benötigt** = Schicht fällt weg (z. B. Tageskasse zu, Gastspiel mit eigener Technik) – "
+               "wird nicht verteilt, nicht als offen gezählt und nicht wieder ergänzt. "
+               "**Löschen** nur für Fehleinträge (z. B. doppelt angelegt).")
     shifts = db.list_shifts(month)
     if not shifts:
         st.write("Noch keine Schichten angelegt.")
         return
+    closed = db.list_closed_days(month)
     df = pd.DataFrame([{
         "id": s["id"], "Datum": fmt_date(s["date"]), "Tag": WEEKDAYS[weekday(s["date"])],
         "Schicht": SHIFT_TYPES[s["shift_type"]], "Zeit": f"{s['start_time']}–{s['end_time']}",
-        "Anzahl": s["required"], "Titel": s["title"] or "", "Löschen": False,
+        "Anzahl": s["required"], "Titel": s["title"] or "",
+        "Hinweis": "Schließtag" if s["date"] in closed else "",
+        "Nicht benötigt": bool(s.get("not_needed")), "Löschen": False,
     } for s in shifts])
-    edited = st.data_editor(df, hide_index=True, key="shift_list", disabled=[c for c in df.columns if c != "Löschen"],
+    edited = st.data_editor(df, hide_index=True, key=f"shift_list_{month}",
+                            disabled=[c for c in df.columns if c not in ("Nicht benötigt", "Löschen")],
                             column_config={"id": None})
-    to_delete = edited.loc[edited["Löschen"], "id"].tolist()
-    if to_delete and st.button(f"{len(to_delete)} Schicht(en) löschen"):
-        for sid in to_delete:
-            db.delete_shift(int(sid))
-        st.rerun()
+    before = dict(zip(df["id"], df["Nicht benötigt"]))
+    changed_on = [int(i) for i, v in zip(edited["id"], edited["Nicht benötigt"]) if v and not before[i]]
+    changed_off = [int(i) for i, v in zip(edited["id"], edited["Nicht benötigt"]) if not v and before[i]]
+    to_delete = [int(i) for i in edited.loc[edited["Löschen"], "id"]]
+    if changed_on or changed_off or to_delete:
+        parts = []
+        if changed_on:
+            parts.append(f"{len(changed_on)}× nicht benötigt")
+        if changed_off:
+            parts.append(f"{len(changed_off)}× wieder benötigt")
+        if to_delete:
+            parts.append(f"{len(to_delete)}× löschen")
+        if st.button("Änderungen übernehmen: " + ", ".join(parts), type="primary", key=f"apply_shifts_{month}"):
+            db.set_shifts_not_needed(changed_on, True)
+            db.set_shifts_not_needed(changed_off, False)
+            for sid in to_delete:
+                db.delete_shift(sid)
+            db.audit(st.session_state.get("user_id"), "Schichten geändert", f"{month}: " + ", ".join(parts))
+            st.rerun()
+
+
+def _render_closed_days(month: str) -> None:
+    """Schließtage: Tage oder Zeiträume ohne Schichten (z. B. Theaterferien), im Excel rot."""
+    st.subheader("Schließtage")
+    st.caption("An Schließtagen werden keine Schichten verteilt und nichts als offen gezählt. "
+               "Im Regieplan (Excel) ist der Tag rot markiert.")
+    y, m = parse_month(month)
+    with st.form(f"closed_form_{month}"):
+        c1, c2 = st.columns([2, 3])
+        rng = c1.date_input("Tag oder Zeitraum", value=(date(y, m, 1), date(y, m, 1)), format="DD.MM.YYYY",
+                            help="Für einen einzelnen Tag Start und Ende gleich wählen.")
+        reason = c2.text_input("Grund (optional)", placeholder="z. B. Theaterferien")
+        if st.form_submit_button("Als Schließtag markieren"):
+            start, end = (rng[0], rng[-1]) if isinstance(rng, (tuple, list)) and rng else (rng, rng)
+            days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+            db.set_closed_days(days, reason.strip())
+            db.audit(st.session_state.get("user_id"), "Schließtage gesetzt",
+                     f"{days[0]} bis {days[-1]} {reason.strip()}")
+            st.rerun()
+    closed = db.list_closed_days(month)
+    if closed:
+        cdf = pd.DataFrame([{"Datum": fmt_date(d), "Tag": WEEKDAYS[weekday(d)], "Grund": r, "Aufheben": False,
+                             "iso": d} for d, r in closed.items()])
+        edited = st.data_editor(cdf, hide_index=True, key=f"closed_list_{month}",
+                                disabled=["Datum", "Tag", "Grund"], column_config={"iso": None})
+        lift = edited.loc[edited["Aufheben"], "iso"].tolist()
+        if lift and st.button(f"{len(lift)} Schließtag(e) aufheben", key=f"lift_{month}"):
+            db.remove_closed_days(lift)
+            db.audit(st.session_state.get("user_id"), "Schließtage aufgehoben", ", ".join(lift))
+            st.rerun()
+    st.divider()
 
 
 # ------------------------------------------------------------------ Team

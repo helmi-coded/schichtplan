@@ -51,7 +51,7 @@ def build_inputs(month: str) -> tuple[list[EmployeeInput], list[ShiftInput]]:
             year_budget_left_eur=year_limit - past.get(u["id"], 0.0) if u["is_minijob"] else None,
         ))
     shifts = []
-    for s in db.list_shifts(month):
+    for s in db.list_active_shifts(month):          # ohne Schließtage / „nicht benötigt“
         start, end = shift_interval(s["date"], s["start_time"], s["end_time"])
         shifts.append(ShiftInput(id=s["id"], date=s["date"], shift_type=s["shift_type"],
                                  start=start, end=end, required=s["required"], label=shift_label(s)))
@@ -109,9 +109,11 @@ def publish(month: str) -> None:
 def plan_overview(month: str, trial: list[tuple[int, int]] | None = None) -> pd.DataFrame:
     from .export_excel import assignment_names
     assigned = assignment_names(month, trial)
+    closed = db.list_closed_days(month)
     rows = []
     for s in db.list_shifts(month):
         names = assigned.get(s["id"], [])
+        inactive = s["date"] in closed or s.get("not_needed")
         rows.append({
             "Datum": fmt_date(s["date"]),
             "Tag": WEEKDAYS[weekday(s["date"])],
@@ -120,8 +122,9 @@ def plan_overview(month: str, trial: list[tuple[int, int]] | None = None) -> pd.
             "Zeit": f"{s['start_time']}–{s['end_time']}",
             "Soll": s["required"],
             "Ist": len(names),
-            "Lücke": max(0, s["required"] - len(names)),
-            "Besetzung": ", ".join(sorted(names)),
+            "Lücke": 0 if inactive else max(0, s["required"] - len(names)),
+            "Besetzung": (f"Schließtag – {closed[s['date']]}".rstrip(" –") if s["date"] in closed
+                          else "nicht benötigt" if s.get("not_needed") else ", ".join(sorted(names))),
         })
     return pd.DataFrame(rows)
 

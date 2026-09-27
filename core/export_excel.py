@@ -37,6 +37,8 @@ FONT_LEGEND = Font(name="Arial", size=9, italic=True, color="000000")
 FILL_HEADER = PatternFill("solid", fgColor="C9DAF8")
 FILL_APP = PatternFill("solid", fgColor="E8F0FE")
 FILL_FREE = PatternFill("solid", fgColor="FFFFFF")
+FILL_CLOSED = PatternFill("solid", fgColor="F4CCCC")         # rot wie „Theaterferien“ im Regieplan
+FONT_CLOSED = Font(name="Arial", size=11, bold=True, color="990000")
 THIN, MEDIUM = Side(style="thin", color="000000"), Side(style="medium", color="000000")
 ALIGN = Alignment(horizontal="left", vertical="top", wrap_text=True)
 ALIGN_HEADER = Alignment(horizontal="left", vertical="top", wrap_text=True)
@@ -65,7 +67,10 @@ def _day_data(month: str, trial: list[tuple[int, int]] | None = None) -> dict[st
     for p in perfs.values():                                   # auch Vorstellungen ohne Schichten zeigen
         days[p["date"]]["events"][("p", p["id"])] = {"time": p["time"], "title": p["title"],
                                                      **{c: [] for c in EVENT_COLUMNS}}
+    closed = db.list_closed_days(month)
     for s in db.list_shifts(month):
+        if s.get("not_needed") or s["date"] in closed:
+            continue                                           # bewusst nicht benötigt / Schließtag
         staffed = sorted(names.get(s["id"], []))
         staffed += [OPEN] * max(0, s["required"] - len(staffed))
         if s["shift_type"] == "TAGESKASSE":
@@ -92,6 +97,7 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
     ws.row_dimensions[1].height = HEADER_HEIGHT
 
     data = _day_data(month, trial)
+    closed = db.list_closed_days(month)
     _, m = parse_month(month)
     row = 2
     for d in (d for w in month_weeks(month) for d in w if d.month == m):
@@ -99,6 +105,10 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
         day = data.get(iso, {"events": {}, "tageskasse": []})
         start = row
         ptr = start
+        if iso in closed:
+            day = {"events": {}, "tageskasse": []}
+            ws.cell(row=start, column=COL["Vorstellungen/Bühne"],
+                    value=("SCHLIESSTAG" + (f" – {closed[iso]}" if closed[iso] else "")))
         for ev in sorted(day["events"].values(), key=lambda e: (e["time"] or "99", e["title"])):
             ws.cell(row=ptr, column=COL["Uhrzeit"], value=ev["time"] or None)
             ws.cell(row=ptr, column=COL["Vorstellungen/Bühne"], value=ev["title"])
@@ -122,6 +132,10 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
                 cell.font = FONT_OPEN if cell.value == OPEN else (
                     FONT_BOLD if h == "Vorstellungen/Bühne" and cell.value else FONT)
                 cell.fill = FILL_APP if h in APP_COLUMNS else FILL_FREE
+                if iso in closed and h == "Vorstellungen/Bühne":
+                    cell.fill = FILL_CLOSED
+                    if cell.value:
+                        cell.font = FONT_CLOSED
                 cell.alignment = ALIGN
                 cell.border = Border(left=THIN, right=THIN, top=MEDIUM if r == start else THIN, bottom=THIN)
         row = start + block
@@ -134,7 +148,7 @@ def _write_month(ws, month: str, trial: list[tuple[int, int]] | None = None) -> 
                      value=("PROBEPLAN – nicht veröffentlicht, Angaben können sich noch ändern · "
                             if trial is not None else "") + "Hellblau = aus dem Schichtplaner (Änderungen bitte in der App vornehmen und neu "
                            "exportieren) · Weiß = frei ausfüllbar (ASL, Proben, Sonstiges) · "
-                           "„offen“ = noch unbesetzt")
+                           "„offen“ = noch unbesetzt · rot = Schließtag")
     legend.font = FONT_LEGEND
     legend.alignment = Alignment(horizontal="left", vertical="top", wrap_text=False)
     ws.row_dimensions[row].height = ROW_HEIGHT
