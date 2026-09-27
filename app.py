@@ -7,14 +7,11 @@ from views import admin, employee, login
 
 st.set_page_config(page_title="Schichtplaner", page_icon="🎭", layout="wide")
 
-# Kalender: gesperrte Tage (primary-Buttons NUR im Kalender) rot, 7 Spalten auch auf dem Handy
+# Kalender: 7 Spalten auch auf dem Handy; gesperrte Tage färbt views/employee.py rot ein
 CSS = """
 <style>
-.st-key-kalender button { width: 100%; min-height: 2.6rem; padding: 0.2rem; }
-.st-key-kalender button[kind="primary"],
-.st-key-kalender button[data-testid="stBaseButton-primary"] {
-    background-color: #C62828; border-color: #C62828; color: #FFFFFF;
-}
+.st-key-kalender [class*="st-key-cal_"] { padding: 0.25rem; border: 1px solid transparent; border-radius: 8px; }
+.st-key-kalender [data-baseweb="select"] > div { min-height: 2.2rem; padding-left: 0.3rem; }
 .st-key-kalender [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 0.25rem; }
 .st-key-kalender [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; width: auto !important; }
 </style>

@@ -27,7 +27,7 @@ from datetime import datetime
 
 from ortools.sat.python import cp_model
 
-from .constants import ALLOWED_TYPES, SHIFT_TYPES
+from .constants import ALLOWED_TYPES, SHIFT_TYPES, TYPE_GROUPS
 
 # Gewichte der Zielfunktion (Punkte). Größenordnungen bewusst gestaffelt.
 W_UNFILLED = 10_000        # je unbesetztem Platz (dominiert alles andere)
@@ -47,6 +47,7 @@ class EmployeeInput:
     role_permission: str
     wage: float
     is_minijob: bool = True
+    min_shifts: int = 0
     max_shifts: int | None = None
     max_hours: float | None = None
     needs_hours: bool = False
@@ -100,9 +101,15 @@ def is_eligible(e: EmployeeInput, s: ShiftInput) -> bool:
         return False
     if e.weekend_exclusion == "SO" and s.weekday == 6:
         return False
-    if (e.type_limits.get(s.shift_type) or {}).get("max") == 0:
-        return False
+    for key, lim in (e.type_limits or {}).items():
+        if (lim or {}).get("max") == 0 and s.shift_type in _types_of(key):
+            return False
     return True
+
+
+def _types_of(key: str) -> set[str]:
+    """Grenzen können für eine Gruppe (KASSE/EINLASS) oder eine einzelne Schichtart gelten."""
+    return TYPE_GROUPS.get(key, {key})
 
 
 def solve(employees: list[EmployeeInput], shifts: list[ShiftInput],
@@ -143,6 +150,10 @@ def solve(employees: list[EmployeeInput], shifts: list[ShiftInput],
 
         if e.max_shifts is not None:
             model.Add(total <= int(e.max_shifts))
+        if e.min_shifts:                           # Wunsch-Minimum: weich, wird möglichst erfüllt
+            short_total = model.NewIntVar(0, int(e.min_shifts), f"short_total_{e.id}")
+            model.Add(total + short_total >= int(e.min_shifts))
+            objective.append(-W_TYPE_MIN * short_total)
 
         per_day = defaultdict(list)
         for s, v in items:
@@ -171,7 +182,7 @@ def solve(employees: list[EmployeeInput], shifts: list[ShiftInput],
         # Unter-/Obergrenzen je Schichtart
         for t, lim in (e.type_limits or {}).items():
             lim = lim or {}
-            tv = [v for s, v in items if s.shift_type == t]
+            tv = [v for s, v in items if s.shift_type in _types_of(t)]
             if lim.get("max") is not None:
                 model.Add(sum(tv) <= int(lim["max"]))
             mn = int(lim.get("min") or 0)

@@ -38,7 +38,20 @@ def test_minijob_cap():
     assert hours * 13.90 <= 603                         # max. 5 Schichten = 556 €
 
 
+def test_min_wish_and_groups():
+    # 6 Einlass-Abende, 3 Personen; A wünscht mind. 4, B max. 1 Kasse-Gruppe egal, C nur Kasse
+    emps = [EmployeeInput(1, "A", "BEIDE", 13.90, min_shifts=4, max_shifts=6),
+            EmployeeInput(2, "B", "BEIDE", 13.90, max_shifts=6, type_limits={"EINLASS": {"min": 0, "max": 1}}),
+            EmployeeInput(3, "C", "EINLASS", 13.90, max_shifts=6)]
+    shifts = [_shift(i, i, "EINLASS") for i in range(5, 11)]
+    res = solve(emps, shifts, minijob_limit_eur=603, time_limit_s=5)
+    count = {e: sum(1 for _, x in res.assignments if x == e) for e in (1, 2, 3)}
+    assert count[1] >= 4                                   # Wunsch-Minimum erfüllt
+    assert count[2] <= 1                                   # Gruppen-Obergrenze Einlass
+
+
 if __name__ == "__main__":
     test_hard_constraints()
     test_minijob_cap()
+    test_min_wish_and_groups()
     print("Alle Tests bestanden.")

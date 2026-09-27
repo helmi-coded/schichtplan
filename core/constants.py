@@ -28,10 +28,17 @@ ALLOWED_TYPES = {
 
 # Wochenend-Ausschluss: maximal EIN Wochenendtag kann hart ausgeschlossen werden
 WEEKEND_EXCLUSION = {
-    "KEINE": "Kein Ausschluss",
-    "SA": "Samstag ausschließen",
-    "SO": "Sonntag ausschließen",
+    "KEINE": "Samstag und Sonntag möglich",
+    "SA": "Samstags nie",
+    "SO": "Sonntags nie",
 }
+
+# Gruppen für die Aufteilung zwischen Kasse und Einlass (Kasse = Tages- + Abendkasse)
+TYPE_GROUPS = {
+    "KASSE": {"TAGESKASSE", "ABENDKASSE"},
+    "EINLASS": {"EINLASS"},
+}
+GROUP_LABELS = {"KASSE": "Kasse", "EINLASS": "Einlass"}
 
 # Gewichtung der Wochentage (weiche Restriktion)
 WEIGHT_LABELS = {

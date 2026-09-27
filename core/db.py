@@ -14,11 +14,12 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 
 from . import config
 from .calendar_utils import is_weekend, now_local
-from .constants import DEFAULT_MAX_SHIFTS, DEFAULT_SETTINGS, SHIFT_TYPES
+from .constants import DEFAULT_MAX_SHIFTS, DEFAULT_SETTINGS, SHIFT_TYPES, TYPE_GROUPS
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.environ.get("SCHICHTPLANER_DB", os.path.join(_BASE_DIR, "schichtplaner.db"))
@@ -223,7 +224,8 @@ MIGRATIONS = {
     },
     "shifts": {"performance_id": "INTEGER REFERENCES performances(id) ON DELETE CASCADE"},
     "plan_status": {"deadline_override": "TEXT"},
-    "preferences": {"role_choice": "TEXT NOT NULL DEFAULT 'BEIDE'", "max_hours": "REAL"},
+    "preferences": {"role_choice": "TEXT NOT NULL DEFAULT 'BEIDE'", "max_hours": "REAL",
+                    "min_shifts": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
@@ -250,13 +252,23 @@ def init_db() -> None:
 
 
 # ---------------------------------------------------------------- Settings
+_settings_cache: dict[str, tuple[float, str]] = {}
+_SETTINGS_TTL = 30.0   # Sekunden – spart Datenbank-Abfragen bei jedem Seitenaufbau
+
+
 def get_setting(key: str) -> str:
+    hit = _settings_cache.get(key)
+    if hit and time.monotonic() - hit[0] < _SETTINGS_TTL:
+        return hit[1]
     with get_conn() as c:
         row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else DEFAULT_SETTINGS.get(key, "")
+    value = row["value"] if row else DEFAULT_SETTINGS.get(key, "")
+    _settings_cache[key] = (time.monotonic(), value)
+    return value
 
 
 def set_setting(key: str, value: str) -> None:
+    _settings_cache.pop(key, None)
     with get_conn() as c:
         c.execute("INSERT INTO settings(key, value) VALUES (?, ?) "
                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
@@ -331,6 +343,14 @@ def get_all_blocked(month: str) -> dict[int, set[str]]:
     return result
 
 
+def set_blocked_days(user_id: int, month: str, dates: set[str]) -> None:
+    """Ersetzt alle Sperrtage der Person im Monat (eine Datenbank-Transaktion)."""
+    with get_conn() as c:
+        c.execute("DELETE FROM blocked_days WHERE user_id = ? AND date LIKE ?", (user_id, f"{month}-%"))
+        c.executemany("INSERT INTO blocked_days(user_id, date) VALUES (?, ?)",
+                      [(user_id, d) for d in sorted(dates) if d.startswith(month)])
+
+
 def toggle_blocked_day(user_id: int, date_iso: str) -> bool:
     """Schaltet einen Sperrtag um. Rückgabe: True = jetzt gesperrt."""
     with get_conn() as c:
@@ -347,12 +367,13 @@ def toggle_blocked_day(user_id: int, date_iso: str) -> bool:
 def default_preferences() -> dict:
     return {
         "role_choice": "BEIDE",          # Einsatzwunsch des Monats: KASSE / EINLASS / BEIDE
+        "min_shifts": 0,                 # Wunsch-Untergrenze (weich)
         "max_shifts": DEFAULT_MAX_SHIFTS,
         "max_hours": None,               # optionale persönliche Stunden-Obergrenze
         "needs_hours": False,
         "weekend_exclusion": "KEINE",
         "weekday_weights": [0] * 7,
-        "type_limits": {t: {"min": 0, "max": None} for t in SHIFT_TYPES},
+        "type_limits": {g: {"min": 0, "max": None} for g in TYPE_GROUPS},   # Kasse / Einlass
         "saved": False,
         "carried_from": None,
     }
@@ -362,6 +383,7 @@ def _prefs_from_row(r) -> dict:
     p = default_preferences()
     p.update({
         "role_choice": r["role_choice"] or "BEIDE",
+        "min_shifts": r["min_shifts"] or 0,
         "max_shifts": r["max_shifts"],
         "max_hours": r["max_hours"],
         "needs_hours": bool(r["needs_hours"]),
@@ -394,16 +416,18 @@ def get_preferences(user_id: int, month: str) -> dict:
 
 def save_preferences(user_id: int, month: str, prefs: dict) -> None:
     with get_conn() as c:
-        c.execute("""INSERT INTO preferences(user_id, month, role_choice, max_shifts, max_hours, needs_hours,
-                                             weekend_exclusion, weekday_weights, type_limits, updated_at)
-                     VALUES (?,?,?,?,?,?,?,?,?,?)
+        c.execute("""INSERT INTO preferences(user_id, month, role_choice, min_shifts, max_shifts, max_hours,
+                                             needs_hours, weekend_exclusion, weekday_weights, type_limits, updated_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(user_id, month) DO UPDATE SET
-                        role_choice=excluded.role_choice, max_shifts=excluded.max_shifts,
+                        role_choice=excluded.role_choice, min_shifts=excluded.min_shifts,
+                        max_shifts=excluded.max_shifts,
                         max_hours=excluded.max_hours, needs_hours=excluded.needs_hours,
                         weekend_exclusion=excluded.weekend_exclusion,
                         weekday_weights=excluded.weekday_weights,
                         type_limits=excluded.type_limits, updated_at=excluded.updated_at""",
-                  (user_id, month, prefs.get("role_choice", "BEIDE"), prefs["max_shifts"], prefs.get("max_hours"),
+                  (user_id, month, prefs.get("role_choice", "BEIDE"), int(prefs.get("min_shifts") or 0),
+                   prefs["max_shifts"], prefs.get("max_hours"),
                    int(prefs["needs_hours"]), prefs["weekend_exclusion"], json.dumps(prefs["weekday_weights"]),
                    json.dumps(prefs["type_limits"]), _now()))
 

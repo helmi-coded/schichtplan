@@ -27,7 +27,7 @@ def build_inputs(month: str) -> tuple[list[EmployeeInput], list[ShiftInput]]:
         employees.append(EmployeeInput(
             id=u["id"], name=u["name"], role_permission=p["role_choice"],
             wage=wage_for(u), is_minijob=bool(u["is_minijob"]),
-            max_shifts=p["max_shifts"], max_hours=p["max_hours"], needs_hours=p["needs_hours"],
+            min_shifts=p["min_shifts"], max_shifts=p["max_shifts"], max_hours=p["max_hours"], needs_hours=p["needs_hours"],
             weekend_exclusion=p["weekend_exclusion"], weekday_weights=p["weekday_weights"],
             type_limits=p["type_limits"], blocked=blocked.get(u["id"], set()),
             prev_weekend_shifts=history.get(u["id"], {}).get("weekend_shifts", 0),
