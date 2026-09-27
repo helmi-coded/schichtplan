@@ -147,7 +147,6 @@ def export_regieplan(months: list[str]) -> bytes:
     return buf.getvalue()
 
 
-def months_with_shifts(around: str, span: int = 12) -> list[str]:
-    """Monate mit Schichten im Umfeld eines Monats (für den Gesamt-Export)."""
-    from .calendar_utils import add_months
-    return [m for m in (add_months(around, i) for i in range(-span, span + 1)) if db.list_shifts(m)]
+def months_with_shifts(around: str | None = None) -> list[str]:
+    """Alle Monate, für die es Schichten gibt (eine einzige Abfrage)."""
+    return db.months_with_shifts()

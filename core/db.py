@@ -100,13 +100,26 @@ class _Conn:
             self.raw.executescript(script)
 
 
+_last_used: dict[int, float] = {}
+
+
+def _mark_used(conn) -> None:
+    _last_used[id(conn)] = time.monotonic()
+
+
+def _check_if_idle(conn) -> None:
+    """Verbindung nur prüfen, wenn sie länger als 60 s ungenutzt war (Neon pausiert nach 5 Min.)."""
+    if time.monotonic() - _last_used.get(id(conn), 0) > 60:
+        ConnectionPool.check_connection(conn)
+
+
 def _get_pool():
     global _pool
     with _pool_lock:
         if _pool is None:
             _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5, open=True,
                                    kwargs={"row_factory": dict_row, "prepare_threshold": None},
-                                   check=ConnectionPool.check_connection)
+                                   check=_check_if_idle, reset=_mark_used, max_idle=240)
         return _pool
 
 
@@ -232,7 +245,15 @@ MIGRATIONS = {
 }
 
 
-def init_db() -> None:
+_initialized = False
+
+
+def init_db(force: bool = False) -> None:
+    """Legt Tabellen an bzw. migriert sie – nur einmal pro Server-Prozess (spart ~15 Abfragen je Klick)."""
+    global _initialized
+    if _initialized and not force:
+        return
+    _initialized = True
     schema = SCHEMA
     if IS_POSTGRES:
         schema = schema.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace(
@@ -436,6 +457,44 @@ def save_preferences(user_id: int, month: str, prefs: dict) -> None:
                    json.dumps(prefs["type_limits"]), _now()))
 
 
+def get_all_preferences(month: str, user_ids: list[int]) -> dict[int, dict]:
+    """Präferenzen mehrerer Personen mit 2 Abfragen statt 2 je Person."""
+    with get_conn() as c:
+        rows = c.execute("SELECT * FROM preferences WHERE month <= ? ORDER BY month DESC", (month,)).fetchall()
+    latest: dict[int, dict] = {}
+    for r in rows:                                     # erster Treffer je Person = aktuellster
+        if r["user_id"] not in latest:
+            latest[r["user_id"]] = r
+    out = {}
+    for uid in user_ids:
+        r = latest.get(uid)
+        if r is None:
+            out[uid] = default_preferences()
+            continue
+        p = _prefs_from_row(r)
+        if r["month"] == month:
+            p["saved"] = True
+        else:
+            p["carried_from"], p["needs_hours"] = r["month"], False
+        out[uid] = p
+    return out
+
+
+def months_with_shifts() -> list[str]:
+    with get_conn() as c:
+        rows = c.execute("SELECT DISTINCT substr(date, 1, 7) AS m FROM shifts ORDER BY m")
+        return [r["m"] for r in rows]
+
+
+def get_assignments_between(first_day: str, last_day: str) -> list[dict]:
+    """Zuteilungen in einem Datumsbereich (für das 12-Monats-Budget der Minijob-Grenze)."""
+    with get_conn() as c:
+        rows = c.execute("""SELECT a.user_id, s.date, s.start_time, s.end_time
+                            FROM assignments a JOIN shifts s ON s.id = a.shift_id
+                            WHERE s.date >= ? AND s.date <= ?""", (first_day, last_day))
+        return [dict(r) for r in rows]
+
+
 def users_with_preferences(month: str) -> set[int]:
     with get_conn() as c:
         return {r[0] for r in c.execute("SELECT user_id FROM preferences WHERE month=?", (month,))}
@@ -524,13 +583,22 @@ def set_plan_status(month: str, status: str) -> None:
                   (month, status, _now()))
 
 
+_deadline_cache: dict[str, tuple[float, str | None]] = {}
+
+
 def get_deadline_override(month: str) -> str | None:
+    hit = _deadline_cache.get(month)
+    if hit and time.monotonic() - hit[0] < _SETTINGS_TTL:
+        return hit[1]
     with get_conn() as c:
         r = c.execute("SELECT deadline_override FROM plan_status WHERE month = ?", (month,)).fetchone()
-    return r["deadline_override"] if r else None
+    value = r["deadline_override"] if r else None
+    _deadline_cache[month] = (time.monotonic(), value)
+    return value
 
 
 def set_deadline_override(month: str, date_iso: str | None) -> None:
+    _deadline_cache.pop(month, None)
     with get_conn() as c:
         c.execute("""INSERT INTO plan_status(month, status, updated_at, deadline_override) VALUES (?, 'OFFEN', ?, ?)
                      ON CONFLICT(month) DO UPDATE SET deadline_override = excluded.deadline_override""",

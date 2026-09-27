@@ -9,10 +9,11 @@ HARTE Restriktionen (werden nie verletzt)
   - Einsatzwunsch des Monats (Kasse / Einlass / beides)
   - Schicht- und Stunden-Obergrenze pro Monat, Obergrenze je Schichtart
   - max. Schichten pro Tag, keine zeitlich überlappenden Schichten
-  - Minijob-Verdienstgrenze (Stunden x Stundenlohn <= Grenze)
+  - Minijob: 12-Monats-Budget (12 x Monatsgrenze) wird nie überschritten
 
 WEICHE Restriktionen (Zielfunktion, gewichtet)
   - Schichten möglichst vollständig besetzen (höchste Priorität)
+  - monatliche Minijob-Grenze nur überschreiten, wenn sonst eine Lücke bliebe
   - Mindestanzahl je Schichtart erfüllen
   - Wochentags-Präferenzen, Priorisierung "braucht dringend Stunden"
   - Fairness: Wochenenddienste nach Vormonats-Historie rotieren,
@@ -31,6 +32,7 @@ from .constants import ALLOWED_TYPES, SHIFT_TYPES, TYPE_GROUPS
 
 # Gewichte der Zielfunktion (Punkte). Größenordnungen bewusst gestaffelt.
 W_UNFILLED = 10_000        # je unbesetztem Platz (dominiert alles andere)
+W_MINIJOB_OVER = 1         # je 10 Cent über der Monatsgrenze (5-h-Schicht ≈ 700 Punkte < 10.000 je Lücke)
 W_TYPE_MIN = 500           # je fehlender Mindestschicht einer Schichtart
 W_MAX_WEEKEND = 200        # höchste Wochenendbelastung einer Person im Team
 W_NEEDS_HOURS = 30         # Bonus je Schicht für Personen, die Stunden brauchen (≈ +3 Schichten ggü. Ø)
@@ -56,6 +58,7 @@ class EmployeeInput:
     type_limits: dict = field(default_factory=dict)
     blocked: dict = field(default_factory=dict)   # {Datum: GANZ | TAG | ABEND} (ein set = ganze Tage)
     prev_weekend_shifts: int = 0
+    year_budget_left_eur: float | None = None   # Rest des 12-Monats-Budgets (Minijob)
 
 
 @dataclass
@@ -194,10 +197,19 @@ def solve(employees: list[EmployeeInput], shifts: list[ShiftInput],
         if e.max_hours:
             model.Add(sum(int(round(s.hours * 60)) * v for s, v in items) <= int(round(e.max_hours * 60)))
 
-        # Minijob-Grenze in Cent (CP-SAT rechnet ganzzahlig)
+        # Minijob-Grenze (in Cent, CP-SAT rechnet ganzzahlig):
+        #  - Monatsgrenze WEICH: darf überschritten werden, wenn sonst ein Platz unbesetzt bliebe.
+        #    Malus 1 Punkt je 10 Cent darüber – kleiner als eine Lücke, aber deutlich größer als
+        #    Wunsch-Punkte. Dadurch werden zuerst Personen eingeplant, die noch Luft haben.
+        #  - 12-Monats-Budget HART: Verdienst der letzten 11 Monate + dieser Monat <= 12 x Monatsgrenze.
         if e.is_minijob and minijob_limit_eur:
-            model.Add(sum(int(round(s.hours * e.wage * 100)) * v for s, v in items)
-                      <= int(round(minijob_limit_eur * 100)))
+            earn = sum(int(round(s.hours * e.wage * 100)) * v for s, v in items)
+            limit = int(round(minijob_limit_eur * 100))
+            over = model.NewIntVar(0, 10_000_000, f"over_{e.id}")        # in 10-Cent-Schritten
+            model.Add(10 * over >= earn - limit)
+            objective.append(-W_MINIJOB_OVER * over)
+            if e.year_budget_left_eur is not None:
+                model.Add(earn <= max(0, int(round(e.year_budget_left_eur * 100))))
 
         # Unter-/Obergrenzen je Schichtart
         for t, lim in (e.type_limits or {}).items():

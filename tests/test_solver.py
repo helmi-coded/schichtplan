@@ -30,12 +30,22 @@ def test_hard_constraints():
     assert res.unfilled == {}                           # alles besetzbar
 
 
-def test_minijob_cap():
-    emps = [EmployeeInput(1, "A", "BEIDE", 13.90, max_shifts=31)]
-    shifts = [_shift(i, i, "EINLASS", "10:00", "18:00") for i in range(1, 11)]  # 10 x 8 h
-    res = solve(emps, shifts, minijob_limit_eur=603, time_limit_s=5)
-    hours = 8 * len(res.assignments)
-    assert hours * 13.90 <= 603                         # max. 5 Schichten = 556 €
+def test_minijob_soft_month_hard_year():
+    shifts = [_shift(i, i, "EINLASS", "10:00", "18:00") for i in range(1, 11)]  # 10 x 8 h = je 111,20 €
+    # a) Nur eine Person, Budget reicht: Monatsgrenze wird überschritten, damit nichts offen bleibt
+    a = EmployeeInput(1, "A", "BEIDE", 13.90, max_shifts=31, year_budget_left_eur=7236)
+    res = solve([a], shifts, minijob_limit_eur=603, time_limit_s=5)
+    assert len(res.assignments) == 10 and not res.unfilled
+    # b) 12-Monats-Budget nur noch 700 €: höchstens 6 Schichten (667,20 €), Rest bleibt offen
+    a.year_budget_left_eur = 700
+    res = solve([a], shifts, minijob_limit_eur=603, time_limit_s=5)
+    assert len(res.assignments) == 6 and sum(res.unfilled.values()) == 4
+    # c) Zweite Person mit Luft: dann wird die Monatsgrenze gar nicht überschritten
+    a.year_budget_left_eur = 7236
+    b = EmployeeInput(2, "B", "BEIDE", 13.90, max_shifts=31, year_budget_left_eur=7236)
+    res = solve([a, b], shifts, minijob_limit_eur=603, time_limit_s=5)
+    per = {e: sum(1 for _, x in res.assignments if x == e) for e in (1, 2)}
+    assert not res.unfilled and max(per.values()) * 8 * 13.90 <= 603
 
 
 def test_min_wish_and_groups():
@@ -64,6 +74,6 @@ def test_partial_day_blocks():
 if __name__ == "__main__":
     test_partial_day_blocks()
     test_hard_constraints()
-    test_minijob_cap()
+    test_minijob_soft_month_hard_year()
     test_min_wish_and_groups()
     print("Alle Tests bestanden.")

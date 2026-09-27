@@ -22,23 +22,20 @@ def render(user: dict, month: str) -> None:
     st.header(f"Verwaltung – {month_label(month)}")
     status = db.get_plan_status(month)
     st.caption(f"Planstatus: **{PLAN_STATUS[status]}**")
-    tabs = st.tabs(["Planung", "Termine & Schichten", "Team", "Stundenkonto", "Rotation", "Einstellungen",
-                    "Protokoll"])
-    with tabs[0]:
-        _tab_planning(month, status, user)
-    with tabs[1]:
-        _tab_shifts(month)
-    with tabs[2]:
-        _tab_team(user)
-    with tabs[3]:
-        _tab_hours(month)
-    with tabs[4]:
-        _tab_history(month)
-    with tabs[5]:
-        _tab_settings()
-    with tabs[6]:
-        st.caption("Sicherheitsrelevante Aktionen (Anmeldungen, Fehlversuche, Planerstellung, Veröffentlichung).")
-        st.dataframe(pd.DataFrame(db.list_audit()), hide_index=True)
+    sections = {
+        "Planung": lambda: _tab_planning(month, status, user),
+        "Termine & Schichten": lambda: _tab_shifts(month),
+        "Team": lambda: _tab_team(user),
+        "Stundenkonto": lambda: _tab_hours(month),
+        "Rotation": lambda: _tab_history(month),
+        "Einstellungen": _tab_settings,
+        "Protokoll": lambda: st.dataframe(pd.DataFrame(db.list_audit()), hide_index=True),
+    }
+    # Nur der gewählte Bereich wird aufgebaut – das spart viele Datenbankabfragen je Klick
+    choice = st.segmented_control("Bereich", list(sections), default="Planung", key="admin_section",
+                                  label_visibility="collapsed") or "Planung"
+    st.divider()
+    sections[choice]()
 
 
 # ------------------------------------------------------------------ Planung
@@ -95,6 +92,8 @@ def _tab_planning(month: str, status: str, admin: dict) -> None:
         db.audit(admin["id"], "Plan erstellt", f"{month}: {result.status}, Lücken {sum(result.unfilled.values())}"
                  + (" (Probelauf vor Fristende)" if open_ else ""))
         st.session_state[f"last_result_{month}"] = result
+        st.session_state.pop(f"xlsx_{month}", None)
+        st.session_state.pop("xlsx_all", None)
         st.rerun()
 
     result = st.session_state.get(f"last_result_{month}")
@@ -116,18 +115,20 @@ def _tab_planning(month: str, status: str, admin: dict) -> None:
         st.markdown("**Regieplan (Excel)** – Einlass, Tageskasse und Abendkasse sind eingetragen; "
                     "Technik, ASL, Proben und Sonstiges bleiben frei.")
         label = month_label(month).replace(" ", "_")
+        xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         c1, c2 = st.columns(2)
-        c1.download_button(f"📥 Regieplan {month_label(month)}", export_excel.export_regieplan([month]),
-                           file_name=f"{date.today().isoformat()}_Regieplan_{label}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary", key=f"xlsx_{month}")
-        all_months = export_excel.months_with_shifts(month)
-        if len(all_months) > 1:
-            c2.download_button(f"📥 Alle Monate ({len(all_months)} Blätter)",
-                               export_excel.export_regieplan(all_months),
+        if c1.button(f"Regieplan {month_label(month)} erstellen", key=f"mk_xlsx_{month}"):
+            st.session_state[f"xlsx_{month}"] = export_excel.export_regieplan([month])
+        if st.session_state.get(f"xlsx_{month}"):
+            c1.download_button("📥 Herunterladen", st.session_state[f"xlsx_{month}"],
+                               file_name=f"{date.today().isoformat()}_Regieplan_{label}.xlsx",
+                               mime=xlsx_mime, type="primary", key=f"dl_xlsx_{month}")
+        if c2.button("Alle Monate mit Plan erstellen (je ein Blatt)", key=f"mk_xlsx_all_{month}"):
+            st.session_state["xlsx_all"] = export_excel.export_regieplan(export_excel.months_with_shifts())
+        if st.session_state.get("xlsx_all"):
+            c2.download_button("📥 Herunterladen (alle Monate)", st.session_state["xlsx_all"],
                                file_name=f"{date.today().isoformat()}_Regieplan_alle_Monate.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key=f"xlsx_all_{month}")
+                               mime=xlsx_mime, key="dl_xlsx_all")
         st.caption("Tipp für Google Tabellen: Datei → Importieren → Hochladen → „Neue Tabellenblätter "
                    "einfügen“ – dann landet der Monat als eigener Reiter in eurem Regieplan.")
         csv = overview.to_csv(sep=";", index=False).encode("utf-8-sig")
@@ -466,14 +467,16 @@ def _tab_hours(month: str) -> None:
         st.write("Noch keine Team-Mitglieder.")
         return
     limit = float(db.get_setting("minijob_grenze"))
-    st.caption(f"Geplante Stunden × Stundenlohn (Standard: gesetzlicher Mindestlohn "
-               f"{fmt_eur(float(db.get_setting('mindestlohn')))}/h), abgeglichen mit der Minijob-Grenze "
-               f"von {fmt_eur(limit)}.")
+    st.caption(f"Geplante Stunden × Stundenlohn (Standard: Mindestlohn "
+               f"{fmt_eur(float(db.get_setting('mindestlohn')))}/h). Die Monatsgrenze von {fmt_eur(limit)} darf "
+               f"überschritten werden, solange die 12-Monats-Summe unter {fmt_eur(12 * limit)} bleibt "
+               "(Jahresdurchschnitt). Grundlage: gespeicherte Pläne der letzten 11 Monate plus dieser Monat.")
     st.dataframe(df, hide_index=True, column_config={
         "Stunden": st.column_config.NumberColumn(format="%.2f"),
         "Stundenlohn €": st.column_config.NumberColumn(format="%.2f"),
         "Verdienst €": st.column_config.NumberColumn(format="%.2f"),
-        "Auslastung Minijob %": st.column_config.NumberColumn(format="%.2f"),
+        "12 Monate €": st.column_config.NumberColumn(format="%.2f"),
+        "Budget 12 Mon. %": st.column_config.NumberColumn(format="%.2f"),
     })
     st.write(f"**Summe Personalkosten (brutto, ohne Arbeitgeberpauschalen): {fmt_eur(df['Verdienst €'].sum())}**")
 
@@ -538,7 +541,10 @@ def _tab_settings() -> None:
     st.subheader("Datensicherung")
     st.caption("Lädt alle Daten (ohne Passwörter und 2FA-Schlüssel) als JSON-Datei herunter. "
                "Empfehlung: einmal pro Monat nach dem Veröffentlichen sichern.")
-    st.download_button("Datensicherung herunterladen",
-                       json.dumps(db.export_all(), ensure_ascii=False, indent=1, default=str).encode("utf-8"),
-                       file_name=f"{date.today().isoformat()}_Schichtplaner_Sicherung.json",
-                       mime="application/json")
+    if st.button("Datensicherung erstellen"):
+        st.session_state["backup"] = json.dumps(db.export_all(), ensure_ascii=False, indent=1,
+                                                default=str).encode("utf-8")
+    if st.session_state.get("backup"):
+        st.download_button("📥 Datensicherung herunterladen", st.session_state["backup"],
+                           file_name=f"{date.today().isoformat()}_Schichtplaner_Sicherung.json",
+                           mime="application/json")
